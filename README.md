@@ -342,6 +342,10 @@ tests/             e2e.py and mock services
 ## Roadmap
 
 - Authentication (local accounts, or trusted reverse-proxy headers)
+- Collision detection with other apps that share slskd (e.g. DroppedNeedle, Soularr): detect when another tool
+  grabs or moves Narratarr's downloads from slskd's completed folder, warn about it, and recover the files
+- Support for other download clients alongside slskd, such as torrent clients (qBittorrent, Transmission) and Usenet
+  (SABnzbd, NZBGet), with indexers via Prowlarr
 - More metadata providers
 - Live updates over SSE instead of polling
 
