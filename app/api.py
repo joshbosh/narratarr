@@ -174,7 +174,7 @@ async def custom_search(request: Request, job_id: int, payload: dict = Body(...)
     if not jobs.get(job_id):
         raise HTTPException(404)
     jobs.update(job_id, status="searching", detail=f"Custom search: {query}")
-    asyncio.create_task(jobs.custom_search(job_id, query))
+    jobs.start_custom_search(job_id, query)
     return {"ok": True}
 
 

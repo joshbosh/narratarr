@@ -166,6 +166,49 @@ def main():
         assert len(j["selected"]["tried"]) <= 2, j["selected"]["tried"]
         ok("5 busy responses → backed off and retried the same source, no candidates burned")
 
+        # 3c — removing/cancelling the active job hands over to the next one immediately
+        print("Scenario 3c: queue hand-off with slow searches and enqueues")
+        mock_cfg = lambda **kw: httpx.post(f"http://127.0.0.1:{MOCK_PORT}/mock/config", json=kw)
+        c.put("/api/settings", json={"slskd.search_seconds": 30}).raise_for_status()
+        mock_cfg(search_secs=60)                       # searches run their whole window, like real slskd
+        nowhere = search(c, "nowhere to be found")[0]
+        a = request(c, nowhere)
+        wait_status(c, a, {"searching"}, 30)
+        b = request(c, search(c, "imported tales")[0])
+        time.sleep(3)
+        c.delete(f"/api/jobs/{a}").raise_for_status()
+        t0 = time.time()
+        wait_status(c, b, {"searching"}, 15)
+        ok(f"removed a job mid-search; next job started searching after {time.time() - t0:.1f}s (search window is 30s)")
+        c.post(f"/api/jobs/{b}/cancel").raise_for_status()
+        c.delete(f"/api/jobs/{b}").raise_for_status()
+
+        mock_cfg(search_secs=1, enqueue_delay=20)      # slskd slow to accept the download
+        c.put("/api/settings", json={"slskd.search_seconds": 5}).raise_for_status()
+        a = request(c, search(c, "long road home")[0])
+        b = request(c, nowhere)
+        t0 = time.time()
+        for _ in range(60):
+            if c.get(f"/api/jobs/{a}").json()["status"] == "downloading":
+                break
+            time.sleep(0.5)
+        wait_status(c, b, {"searching", "needs_review"}, 15)
+        ok(f"next job started searching {time.time() - t0:.1f}s in, while the previous download was still being queued (20s)")
+        c.delete(f"/api/jobs/{a}").raise_for_status()
+        c.post(f"/api/jobs/{b}/cancel"); c.delete(f"/api/jobs/{b}")
+        def live_transfers():
+            r = httpx.get(f"http://127.0.0.1:{MOCK_PORT}/api/v0/transfers/downloads/discpeer", headers={"X-API-Key": "testkey"})
+            files = (r.json().get("directories") or [{}])[0].get("files", []) if r.status_code == 200 else []
+            return [t for t in files if not t["state"].startswith("Completed")]
+        time.sleep(22)                                 # the slow enqueue for disc 1 returns, then gets undone
+        for _ in range(20):
+            if not live_transfers():
+                break
+            time.sleep(1)
+        assert not live_transfers(), "transfers queued for a removed job must be cancelled"
+        ok("transfers that slskd accepted after the job was removed were cancelled")
+        mock_cfg(search_secs=2, enqueue_delay=0)
+
         # 4 — no results → needs_review, custom search, manual pick
         print("Scenario 4: nothing found → needs review → custom search → pick")
         book = search(c, "nowhere to be found")[0]

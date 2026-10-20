@@ -86,13 +86,18 @@ class SlskdClient:
             if r.status_code >= 400:
                 raise SlskdError(f"search failed ({r.status_code}): {r.text[:200]}")
             deadline = time.monotonic() + seconds
-            while time.monotonic() < deadline:
-                await asyncio.sleep(1.5)
-                s = await c.get(f"/searches/{sid}")
-                if s.status_code == 200:
-                    st = s.json()
-                    if st.get("isComplete") or "Completed" in str(st.get("state", "")):
-                        break
+            try:
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(1.5)
+                    s = await c.get(f"/searches/{sid}")
+                    if s.status_code == 200:
+                        st = s.json()
+                        if st.get("isComplete") or "Completed" in str(st.get("state", "")):
+                            break
+            except asyncio.CancelledError:
+                # The job was cancelled/removed: stop and discard the search in slskd, then propagate.
+                await asyncio.shield(self._abandon_search(sid))
+                raise
             await c.put(f"/searches/{sid}")  # stop if still running (no-op otherwise)
             await asyncio.sleep(0.5)
             rr = await c.get(f"/searches/{sid}/responses")
@@ -103,6 +108,14 @@ class SlskdClient:
                 except httpx.HTTPError:
                     pass
             return responses
+
+    async def _abandon_search(self, sid: str) -> None:
+        try:
+            async with self._client() as c:
+                await c.put(f"/searches/{sid}")
+                await c.delete(f"/searches/{sid}")
+        except httpx.HTTPError:
+            pass
 
     async def enqueue(self, username: str, files: list[dict], destination: str | None = None) -> str:
         """Queue files from one user. Returns 'batch' or 'legacy' (how it was queued).

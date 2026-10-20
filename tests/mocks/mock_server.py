@@ -27,7 +27,7 @@ PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9100
 SRC = WORK / "src"
 DL = WORK / "slskd-downloads"
 BASE = f"http://127.0.0.1:{PORT}"
-CONFIG = {"batches": True, "busy": 0}
+CONFIG = {"batches": True, "busy": 0, "search_secs": 2, "enqueue_delay": 0}
 
 
 def ff(*args):
@@ -211,7 +211,7 @@ def search_state(sid: str):
     s = SEARCHES.get(sid) or {}
     if not s:
         raise HTTPException(404)
-    if time.time() - s["started"] > 2:
+    if time.time() - s["started"] > CONFIG["search_secs"]:
         s["state"], s["isComplete"] = "Completed, TimedOut", True
     return {k: v for k, v in s.items() if k != "responses"}
 
@@ -240,6 +240,8 @@ def _busy():
 
 
 def _enqueue(username: str, files: list[dict], dest: str | None):
+    if CONFIG["enqueue_delay"]:
+        time.sleep(CONFIG["enqueue_delay"])  # real slskd blocks while it connects to the peer
     lst = TRANSFERS.setdefault(username, [])
     for f in files:
         share = next(s for s in SHARES if s[1] == f["filename"])
