@@ -51,8 +51,39 @@ Narratarr is on-demand only: there's no author or new-release monitoring.
 
 ## Quick start (Docker Compose)
 
-You need a running [slskd](https://github.com/slskd/slskd) instance with an API key, and Narratarr needs access to slskd's
-downloads folder.
+### Before you start
+
+Narratarr needs three things from slskd:
+
+- **A running [slskd](https://github.com/slskd/slskd) instance** that's logged in to Soulseek and reachable from the Narratarr
+  container.
+- **An API key with the `readwrite` role.** Keys go under `web.authentication.api_keys` in `slskd.yml` (see slskd's
+  [API Keys documentation](https://github.com/slskd/slskd/blob/master/docs/config.md#api-keys)). Keys added this way
+  default to `readonly`, which can search but can't queue downloads, so set the role explicitly:
+
+  ```yaml
+  web:
+    authentication:
+      api_keys:
+        narratarr:
+          key: <16 to 255 random characters>
+          role: readwrite
+  ```
+
+  You can generate a key with:
+
+  ```bash
+  openssl rand -hex 24
+  ```
+
+  Restart slskd after editing `slskd.yml`. You can also limit the key to your LAN with a `cidr` entry (see the same
+  docs).
+- **Access to slskd's downloads folder.** This is the folder set by `directories.downloads` (see
+  [Incomplete and Downloads](https://github.com/slskd/slskd/blob/master/docs/config.md#incomplete-and-downloads)). By
+  default it's `downloads` inside slskd's app directory, which is `/app/downloads` in the official container. Mount the
+  same host folder into Narratarr at `/slskd-downloads`.
+
+### Install
 
 1. Create a `docker-compose.yml`:
 
@@ -157,8 +188,8 @@ them (`user:` in compose). This is usually the same one slskd runs as.
 
 ## slskd
 
-- Create an API key with role `readwrite` under `web.authentication.api_keys` in `slskd.yml` and paste it into
-  *Settings → slskd*.
+- Paste the `readwrite` API key from [Before you start](#before-you-start) into *Settings → slskd* and press
+  **Save & test**.
 - Newer slskd versions accept a per-download destination, so Narratarr's files land in
   `<downloads>/narratarr/<job>/`. Older versions use slskd's default layout. Narratarr detects which automatically and
   finds finished files by name and size either way.
