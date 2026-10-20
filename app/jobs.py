@@ -21,6 +21,7 @@ from . import matching
 from .integrations.abs import AbsSync
 from .postprocess import process_book, safe_segment
 from .providers import full_metadata, get_provider
+from .providers.base import clean_contributors
 from .slskd import SlskdBusy, SlskdClient, SlskdError, transfer_failed, transfer_succeeded
 
 log = logging.getLogger(__name__)
@@ -93,6 +94,7 @@ class JobManager:
         return self.db.one(f"SELECT * FROM jobs WHERE asin=? AND status IN ({marks})", (asin, *ACTIVE))
 
     def create_download(self, book: dict, user_id: str | None = None) -> int:
+        book = clean_contributors(dict(book))
         s = _book_summary(book)
         now = time.time()
         jid = self.db.insert("jobs", {
@@ -104,6 +106,7 @@ class JobManager:
         return jid
 
     def create_import(self, book: dict, path: Path, mode: str, user_id: str | None = None) -> int:
+        book = clean_contributors(dict(book))
         s = _book_summary(book)
         now = time.time()
         jid = self.db.insert("jobs", {
@@ -135,7 +138,7 @@ class JobManager:
                 await asyncio.sleep(5)
 
     async def _prepare_book(self, job: dict) -> tuple[dict, list[str]]:
-        book = job["book"]
+        book = clean_contributors(job["book"])
         if book.get("asin") and not book.get("_enriched"):
             try:
                 full = await full_metadata(self.settings, book["asin"], book.get("region"))
@@ -144,6 +147,7 @@ class JobManager:
             except Exception as e:  # noqa: BLE001
                 self.log(job["id"], f"Metadata enrichment failed: {e}")
             book["_enriched"] = True
+            book = clean_contributors(book)
             self.update(job["id"], book=book, **_book_summary(book))
             if book.get("chapters"):
                 self.log(job["id"], f"Audible chapter data: {len(book['chapters'])} chapters")
@@ -152,7 +156,7 @@ class JobManager:
         if "_alt_narrators" not in book and book.get("authors"):
             try:
                 st = matching.short_title(book["title"])
-                results = await get_provider(self.settings).search(f"{st} {book['authors'][0]['name']}", 20)
+                results = await get_provider(self.settings).search(f"{st} {matching.primary_author(book)}", 20)
                 for r in results:
                     if r.get("asin") != book.get("asin") and \
                             fuzz.ratio(matching.norm(matching.short_title(r["title"])), matching.norm(st)) >= 90:
@@ -456,7 +460,7 @@ class JobManager:
     async def run_processing(self, job_id: int) -> None:
         job = self.get(job_id)
         src = Path(job["staging_path"] or self.staging_dir(job))
-        book = {k: v for k, v in job["book"].items()}
+        book = clean_contributors({k: v for k, v in job["book"].items()})
         try:
             if job["kind"] == "download" and not book.get("_enriched") and book.get("asin"):
                 book, _ = await self._prepare_book(job)

@@ -12,7 +12,7 @@ import re
 
 import httpx
 
-from .base import empty_book, html_to_text
+from .base import empty_book, html_to_text, split_role
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +51,9 @@ def normalise(p: dict, region: str) -> dict:
         "provider": "audible",
         "title": (p.get("title") or "").strip(),
         "subtitle": p.get("subtitle"),
-        "authors": [{"name": a.get("name"), "asin": a.get("asin")} for a in p.get("authors") or [] if a.get("name")],
-        "narrators": [n.get("name") for n in p.get("narrators") or [] if n.get("name")],
+        "authors": [{"name": split_role(a["name"])[0], "role": split_role(a["name"])[1], "asin": a.get("asin")}
+                    for a in p.get("authors") or [] if a.get("name")],
+        "narrators": [split_role(n["name"])[0] for n in p.get("narrators") or [] if n.get("name")],
         "series": [
             {"name": s.get("title"), "sequence": (s.get("sequence") or None), "asin": s.get("asin")}
             for s in p.get("series") or [] if s.get("title")

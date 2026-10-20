@@ -88,6 +88,8 @@ CATALOG = {
         product("B0SHELF001", "Shelf Bound", ["Abe Shelver"], ["Nia Reader"], 1, [("Shelf Saga", "3")]),
         product("B0EXIST001", "Existing Story", ["Old Author"], ["Prior Voice"], 1),
         product("B0CLASS001", "Shelf Classic", ["Ada Shelf"], ["Some Reader"], 1),
+        product("B0EDIT0001", "Essays On Rivers", ["Lena Krause - editor", "Omar Field - foreword"],
+                ["Contributing Authors", "Lena Krause"], 1),
     ],
     "us": [
         product("B0USONLY01", "American Exclusive", ["Usa Author"], ["Us Narrator"], 1),
@@ -112,6 +114,7 @@ SHARES = [
     # series dump folder containing several books
     ("dumppeer", "@@dump\\Jane Author\\Everything\\The Tiny Test.m4b", "single.m4b", 60, {}),
     ("dumppeer", "@@dump\\Jane Author\\Everything\\Some Other Book.m4b", "single.m4b", 60, {}),
+    ("essaypeer", "@@es\\Audiobooks\\Lena Krause\\Essays On Rivers\\Essays On Rivers.m4b", "single.m4b", 60, {}),
     ("shelfpeer", "@@sh\\Audiobooks\\Abe Shelver\\Shelf Saga 3 - Shelf Bound\\Shelf Bound.m4b", "single.m4b", 60, {}),
 ]
 

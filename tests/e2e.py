@@ -221,6 +221,22 @@ def main():
         assert c.get("/queue").status_code == 200 and "Narratarr" in c.get("/library").text
         ok("SPA routes served")
 
+        # 6b — Audible role suffixes ("Name - editor") must not leak into searches, tags or folders
+        print("Scenario 6b: contributor roles stripped")
+        ed = search(c, "essays on rivers")[0]
+        assert [a["name"] for a in ed["authors"]] == ["Lena Krause", "Omar Field"], ed["authors"]
+        assert [a["role"] for a in ed["authors"]] == ["editor", "foreword"], ed["authors"]
+        jid = request(c, ed)
+        j = wait_status(c, jid, {"completed", "failed", "needs_review"}, 90)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        assert not any("editor" in a["query"] or "foreword" in a["query"] or "contributing" in a["query"]
+                       for a in j["attempts"]), [a["query"] for a in j["attempts"]]
+        out = Path(j["output_path"])
+        assert out.parts[-2] == "Lena Krause, Omar Field", out
+        t = mutagen.File(str(out / "Essays On Rivers.m4b"))
+        assert t["\xa9ART"] == ["Lena Krause, Omar Field"], t.get("\xa9ART")
+        ok(f"roles split off (editor, foreword); queries {[a['query'] for a in j['attempts']]}; tags and folder clean")
+
         # 7 — Audiobookshelf
         print("Scenario 7: Audiobookshelf integration")
         abs_local = WORK / "abs-library"
