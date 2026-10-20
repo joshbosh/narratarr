@@ -140,18 +140,33 @@ function renderSearch(view) {
   const results = h("div", { class: "results" });
   const info = h("div", { class: "muted", style: { marginBottom: "10px" } });
   const form = h("form", { class: "searchbar", onsubmit: (e) => { e.preventDefault(); run(); } }, input, h("button", { class: "btn primary" }, "Search"));
+  let seq = 0;      // ignores responses from searches that were superseded or cleared
+  let rows = [];    // [{ book, setState }] for live status updates
+
+  function clear() {
+    seq++;
+    lastSearch = { q: "", results: null };
+    rows = [];
+    info.textContent = "";
+    results.replaceChildren();
+  }
+  // The search box's ✕ (and deleting all the text) resets the page
+  input.addEventListener("input", () => { if (!input.value.trim()) clear(); });
 
   async function run() {
     const q = input.value.trim();
-    if (!q) return;
+    if (!q) { clear(); return; }
+    const mine = ++seq;
     lastSearch.q = q;
     results.replaceChildren(h("div", { class: "muted" }, h("span", { class: "spinner" }), "  Searching Audible…"));
     info.textContent = "";
     try {
       const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if (mine !== seq) return;
       lastSearch.results = data;
       draw(data);
     } catch (e) {
+      if (mine !== seq) return;
       results.replaceChildren(h("div", { class: "empty" }, h("b", {}, "Lookup failed"), e.message));
     }
   }
@@ -159,15 +174,35 @@ function renderSearch(view) {
   function draw(data) {
     const list = data.results || [];
     info.textContent = list.length ? `${list.length} results · ${data.region.toUpperCase()} store` : "";
-    if (!list.length) { results.replaceChildren(h("div", { class: "empty" }, h("b", {}, "No matches"), "Try fewer words, or search by ASIN.")); return; }
-    results.replaceChildren(...list.map(resultRow));
+    if (!list.length) { rows = []; results.replaceChildren(h("div", { class: "empty" }, h("b", {}, "No matches"), "Try fewer words, or search by ASIN.")); return; }
+    rows = list.map((b) => ({ book: b, ...resultRow(b) }));
+    results.replaceChildren(...rows.map((r) => r.el));
+  }
+
+  // Keep queued / in-library / Audiobookshelf badges current (removed jobs, finished downloads…)
+  async function refreshStatus() {
+    if (!rows.length) return;
+    const mine = seq;
+    try {
+      const st = await api("/api/search/status", { method: "POST", body: { items: rows.map((r) => ({ asin: r.book.asin, title: r.book.title, authors: r.book.authors })) } });
+      if (mine !== seq) return;
+      for (const r of rows) {
+        const x = st[r.book.asin];
+        if (!x) continue;
+        const changed = JSON.stringify([r.book.in_library, r.book.job, r.book.in_abs]) !== JSON.stringify([x.in_library, x.job, x.in_abs]);
+        Object.assign(r.book, x);
+        if (changed) r.setState();
+      }
+    } catch { /* ignore */ }
   }
 
   view.append(
     h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Search"), h("div", { class: "sub" }, "Find a release on Audible, then request it from Soulseek."))),
     form, info, results,
   );
-  if (lastSearch.results) draw(lastSearch.results);
+  if (lastSearch.results) { draw(lastSearch.results); refreshStatus(); }
+  const timer = setInterval(refreshStatus, 4000);
+  pageCleanup = () => clearInterval(timer);
 }
 
 function resultRow(b) {
@@ -197,9 +232,9 @@ function resultRow(b) {
     setState();
   }
   setState();
-  const desc = b.description ? h("div", { class: "desc", onclick: (e) => e.currentTarget.classList.toggle("open") }, b.description) : null;
+  const descEl = b.description ? h("div", { class: "desc", onclick: (e) => e.currentTarget.classList.toggle("open") }, b.description) : null;
   const abridged = b.format && b.format.toLowerCase() === "abridged";
-  return h("article", { class: "result" },
+  const el = h("article", { class: "result" },
     cover(b.cover_url, b.title),
     h("div", {},
       h("div", { class: "title" }, b.title),
@@ -214,8 +249,9 @@ function resultRow(b) {
         abridged ? h("span", { class: "pill warn" }, "Abridged") : null,
         h("span", { class: "pill region" }, b.region),
         h("span", { class: "pill mono" }, b.asin)),
-      desc),
+      descEl),
     act);
+  return { el, setState };
 }
 
 // =================================================================== QUEUE
