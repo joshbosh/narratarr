@@ -633,7 +633,7 @@ async function renderSettings(view) {
     h("div", { style: { fontSize: "12px", color: p.exists && p.writable ? "var(--ok)" : "var(--bad)" } }, !p.exists ? "missing" : p.writable ? "ok · writable" : "not writable"));
   statusBox.append(
     pathCell("Incomplete", sys.paths.incomplete), pathCell("Completed", sys.paths.completed), pathCell("slskd downloads (mounted)", sys.paths.slskd_downloads),
-    h("div", { class: "panel" }, h("div", { class: "k" }, "Runtime"), h("div", { class: "v" }, `Narratarr ${sys.version}`),
+    h("div", { class: "panel" }, h("div", { class: "k" }, "Runtime"), h("div", { class: "v" }, `Narratarr ${/^\d/.test(sys.version) ? "v" : ""}${sys.version}`),
       h("div", { style: { fontSize: "12px", color: sys.ffmpeg ? "var(--ok)" : "var(--warn)" } }, sys.ffmpeg ? "ffmpeg available (m4b chapter embedding)" : "ffmpeg missing — m4b chapters skipped")));
 
   const groups = {};
@@ -722,7 +722,7 @@ async function refreshBadge() {
 async function refreshFoot() {
   try {
     const s = await api("/api/system/status");
-    $("#sidebar-foot").replaceChildren(h("div", {}, h("span", { class: `dot ${s.paths.completed.writable ? "ok" : "bad"}` }), `v${s.version} · ${s.library} in library`));
+    $("#sidebar-foot").replaceChildren(h("div", {}, h("span", { class: `dot ${s.paths.completed.writable ? "ok" : "bad"}` }), `${/^\d/.test(s.version) ? "v" : ""}${s.version} · ${s.library} in library`));
   } catch { $("#sidebar-foot").replaceChildren(h("div", {}, h("span", { class: "dot bad" }), "server unreachable")); }
 }
 

@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 
 ARG VERSION=dev
+ARG REVISION=
 LABEL org.opencontainers.image.title="Narratarr" \
       org.opencontainers.image.description="Request audiobooks by Audible release and fetch them through slskd, tagged and ready for Audiobookshelf" \
       org.opencontainers.image.source="https://github.com/joshbosh/narratarr" \
@@ -18,7 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY web ./web
 
-ENV NARRATARR_DATA_DIR=/config \
+ENV NARRATARR_VERSION=${VERSION} \
+    NARRATARR_REVISION=${REVISION} \
+    NARRATARR_DATA_DIR=/config \
     PYTHONUNBUFFERED=1
 VOLUME ["/config", "/downloads"]
 EXPOSE 8787
