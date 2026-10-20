@@ -89,6 +89,7 @@ CATALOG = {
         product("B0EXIST001", "Existing Story", ["Old Author"], ["Prior Voice"], 1),
         product("B0CLASS001", "Shelf Classic", ["Ada Shelf"], ["Some Reader"], 1),
         {**product("B0GAP00001", "Gap Book", ["Gwen Gap"], [], 1), "publisher_summary": None, "series": []},
+        product("B0CHAP0001", "Chapter Book", ["Cora Chapter"], ["Pat Reader"], 1),
         product("B0EDIT0001", "Essays On Rivers", ["Lena Krause - editor", "Omar Field - foreword"],
                 ["Contributing Authors", "Lena Krause"], 1),
     ],
@@ -115,6 +116,8 @@ SHARES = [
     # series dump folder containing several books
     ("dumppeer", "@@dump\\Jane Author\\Everything\\The Tiny Test.m4b", "single.m4b", 60, {}),
     ("dumppeer", "@@dump\\Jane Author\\Everything\\Some Other Book.m4b", "single.m4b", 60, {}),
+    *[("chappeer", f"@@ch\\Audiobooks\\Cora Chapter\\Chapter Book\\0{n} - Chapter Book.mp3", "part.mp3", 15, {})
+      for n in (1, 2, 3)],
     ("indiepeer", "@@in\\Audiobooks\\Ivy Indie\\Indie Tale\\Indie Tale.m4b", "single.m4b", 60, {}),
     ("essaypeer", "@@es\\Audiobooks\\Lena Krause\\Essays On Rivers\\Essays On Rivers.m4b", "single.m4b", 60, {}),
     ("shelfpeer", "@@sh\\Audiobooks\\Abe Shelver\\Shelf Saga 3 - Shelf Bound\\Shelf Bound.m4b", "single.m4b", 60, {}),

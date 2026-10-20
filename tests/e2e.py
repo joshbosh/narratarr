@@ -321,6 +321,45 @@ def main():
         httpx.post(f"http://127.0.0.1:{MOCK_PORT}/mock/config", json={"audible_down": False})
         c.put("/api/settings", json={"metadata.hardcover_enabled": False}).raise_for_status()
 
+        # 6d — size: lean copies preferred, large ones lose a little, never enough to beat a better match
+        print("Scenario 6d: bitrate in scoring")
+        sys.path.insert(0, str(ROOT))
+        from app import matching as M
+        bk = {"title": "Lean Book", "authors": [{"name": "Lee Lean"}], "narrators": [], "series": [], "runtime_min": 600}
+        ctx = M.scoring_context(bk, ["m4b", "mp3"], 8)
+        def resp(user, kbps, length=36000):
+            return {"username": user, "hasFreeUploadSlot": True, "queueLength": 0, "uploadSpeed": 2_000_000,
+                    "files": [{"filename": f"@@{user}\\Lee Lean\\Lean Book\\Lean Book.mp3", "extension": "mp3",
+                               "size": int(kbps * 1000 / 8 * length), "length": length}]}
+        cands = {c["username"]: c for c in M.build_candidates([resp("lean", 64), resp("big", 180), resp("huge", 320),
+                                                               resp("tiny", 24)], bk, ctx)}
+        order = sorted(cands, key=lambda u: cands[u]["rank"], reverse=True)
+        assert order == ["lean", "big", "huge", "tiny"], [(u, cands[u]["score"]) for u in order]
+        assert cands["lean"]["kbps"] == 64 and any("large" in r for r in cands["big"]["reasons"])
+        partial = M.build_candidates([resp("partial", 64, length=5400)], bk, ctx)[0]
+        assert cands["huge"]["score"] > partial["score"], "a large complete copy still beats a lean partial one"
+        ok(f"order {order}; scores " + ", ".join(f"{u} {cands[u]['score']}" for u in order) + f"; partial {partial['score']}")
+
+        # 6e — optional re-encode to a single M4B
+        print("Scenario 6e: re-encode to one M4B")
+        c.put("/api/settings", json={"processing.reencode": True, "processing.reencode_kbps": 64}).raise_for_status()
+        jid = request(c, search(c, "chapter book")[0])
+        j = wait_status(c, jid, {"completed", "failed", "needs_review"}, 120)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        out = Path(j["output_path"])
+        audio = sorted(p.name for p in out.rglob("*") if p.suffix in (".mp3", ".m4b"))
+        assert audio == ["Chapter Book.m4b"], audio
+        m4b = out / "Chapter Book.m4b"
+        probe = json.loads(subprocess.run(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_chapters",
+                                           "-show_format", str(m4b)], capture_output=True, text=True).stdout)
+        titles = [ch["tags"]["title"] for ch in probe["chapters"]]
+        assert titles == ["01 - Chapter Book", "02 - Chapter Book", "03 - Chapter Book"], titles
+        assert abs(float(probe["format"]["duration"]) - 45) < 2, probe["format"]["duration"]
+        assert mutagen.File(str(m4b))["\xa9alb"] == ["Chapter Book"]
+        assert any("Re-encoded:" in l["msg"] for l in j["log"]), [l["msg"] for l in j["log"]]
+        ok(f"3 MP3s → one M4B with chapters {titles}, tagged, originals removed")
+        c.put("/api/settings", json={"processing.reencode": False}).raise_for_status()
+
         # 7 — Audiobookshelf
         print("Scenario 7: Audiobookshelf integration")
         abs_local = WORK / "abs-library"

@@ -524,7 +524,8 @@ class JobManager:
                       "query": selected.get("query"), "local_source": str(src) if job["kind"] == "import" else None}
             clean_book = {k: v for k, v in book.items() if not k.startswith("_")}
             summary = await process_book(src, clean_book, self.settings, copy=job.get("import_mode") == "copy",
-                                         source_info=source, log_fn=lambda m: self.log(job_id, m))
+                                         source_info=source, log_fn=lambda m: self.log(job_id, m),
+                                         progress_fn=lambda pct: self.update(job_id, detail=f"Re-encoding to M4B · {pct}%"))
             self._library_upsert(job, clean_book, summary)
             send = self.abs.enabled
             self.update(job_id, status="completed", output_path=summary["path"], progress=100,
@@ -650,12 +651,13 @@ class JobManager:
                 for job in self.db.query("SELECT id FROM jobs WHERE status='downloading'"):
                     await self.check_download(job["id"])
                 for job in self.db.query("SELECT id FROM jobs WHERE status='processing' ORDER BY updated_at"):
-                    if job["id"] not in self._busy:
-                        self._busy.add(job["id"])
-                        try:
-                            await self.run_processing(job["id"])
-                        finally:
-                            self._busy.discard(job["id"])
+                    # one book at a time, in the background, so a long re-encode doesn't stall downloads
+                    if not self._busy:
+                        jid = job["id"]
+                        self._busy.add(jid)
+                        task = asyncio.create_task(self.run_processing(jid), name=f"process-{jid}")
+                        task.add_done_callback(lambda t, jid=jid: self._busy.discard(jid))
+                    break
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001

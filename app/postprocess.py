@@ -170,7 +170,7 @@ def unique_dest(dest: Path, asin: str | None) -> Path:
 
 
 async def process_book(src: Path, book: dict, settings, *, copy: bool = False, source_info: dict | None = None,
-                       log_fn=log.info) -> dict:
+                       log_fn=log.info, progress_fn=None) -> dict:
     """Organise + tag. Returns a summary used for the library record."""
     if not src.exists():
         raise FileNotFoundError(f"Source folder missing: {src}")
@@ -197,6 +197,24 @@ async def process_book(src: Path, book: dict, settings, *, copy: bool = False, s
                 if not target.exists():
                     _move_or_copy(p, target, copy)
     moved = sorted(moved, key=lambda p: natural_key(str(p.relative_to(dest))))
+
+    if settings.get("processing.reencode"):
+        from .reencode import current_kbps, reencode, should_reencode
+        kbps = int(settings.get("processing.reencode_kbps") or 64)
+        if should_reencode(moved, kbps):
+            before = sum(p.stat().st_size for p in moved)
+            was = current_kbps(moved)
+            log_fn(f"Re-encoding {len(moved)} file(s) ({was or 0:.0f} kbps) to one M4B at {kbps} kbps")
+            try:
+                import asyncio
+                new = await asyncio.to_thread(reencode, moved, dest, safe_segment(book.get("title") or "Audiobook"),
+                                              book, kbps, progress_fn)
+                moved = [new]
+                log_fn(f"Re-encoded: {before / 1e6:.0f} MB → {new.stat().st_size / 1e6:.0f} MB")
+            except Exception as e:  # noqa: BLE001
+                log_fn(f"Re-encode failed, keeping the original files: {e}")
+        else:
+            log_fn("Re-encode skipped: already a single file at or below the target bitrate")
 
     cover = None
     if settings.get("processing.save_cover") or settings.get("processing.embed_cover"):

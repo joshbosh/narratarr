@@ -94,6 +94,11 @@ SCHEMA: list[Setting] = [
     Setting("processing.save_cover", True, "bool", "Save cover.jpg", "Processing"),
     Setting("processing.embed_chapters", True, "bool", "Embed chapters in single-file books", "Processing",
             "Only when the file has none and its length matches Audible's runtime."),
+    Setting("processing.reencode", False, "bool", "Re-encode to a single M4B", "Processing",
+            "Joins the book's audio into one M4B file with chapters, at the bitrate below. Only when it makes the "
+            "book smaller or turns several files into one. Replaces the original files (so their names aren't kept)."),
+    Setting("processing.reencode_kbps", 64, "int", "Re-encode bitrate (kbps)", "Processing",
+            "64 is plenty for speech."),
     Setting("processing.sidecars", True, "bool", "Write metadata.opf / metadata.json / desc.txt / reader.txt",
             "Processing", "Audiobookshelf reads all of these."),
 

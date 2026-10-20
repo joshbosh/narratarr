@@ -43,6 +43,8 @@
 - **Hands off to Audiobookshelf.** Each finished book is moved or copied into your library folder, Audiobookshelf is
   asked to scan just that folder, the new item is matched by path, and missing metadata is filled in. Anything that
   can't finish (Audiobookshelf down, folder not mounted) waits as *pending* and retries.
+- **Optional re-encode** (off by default): join a book's files into one M4B with chapters at a lean bitrate (64 kbps
+  by default) using the bundled FFmpeg. It only runs when it helps, and replaces the original files.
 - **Manual Import:** point it at any folder of audio, match it to an Audible release, and it gets the same treatment.
 
 Narratarr is on-demand only: there's no author or new-release monitoring.
@@ -255,6 +257,9 @@ Candidates are scored on:
 | Format | 8% | Your preference order, default `m4b, mp3, m4a, flac, opus, ogg` |
 | Availability | 7% | Free upload slot, queue length, speed |
 
+Size counts a little too: copies above 160 kbps lose a few points, and ones below 32 kbps lose more, so a lean
+copy wins between two equally good matches. It's never enough to make a partial or wrong copy win over a complete one.
+
 Penalties apply for another narrator of the same title, *abridged* or *dramatised* versions, samples, and a different
 series number. Results below the threshold wait in **Needs review**, where you can see each candidate's score with the
 reasons and pick one, or run a custom search.
@@ -293,6 +298,8 @@ first-run default with an environment variable. The variable only applies until 
 | `NARRATARR_PROCESSING__EMBED_COVER` | Embed cover art in files | `true` |
 | `NARRATARR_PROCESSING__SAVE_COVER` | Save cover.jpg | `true` |
 | `NARRATARR_PROCESSING__EMBED_CHAPTERS` | Embed chapters in single-file books | `true` |
+| `NARRATARR_PROCESSING__REENCODE` | Re-encode to a single M4B | `false` |
+| `NARRATARR_PROCESSING__REENCODE_KBPS` | Re-encode bitrate (kbps) | `64` |
 | `NARRATARR_PROCESSING__SIDECARS` | Write metadata.opf / metadata.json / desc.txt / reader.txt | `true` |
 | `NARRATARR_ABS__ENABLED` | Send finished books to Audiobookshelf | `false` |
 | `NARRATARR_ABS__URL` | Audiobookshelf URL | `http://audiobookshelf:80` |
