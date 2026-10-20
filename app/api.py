@@ -73,17 +73,17 @@ def _writable(p: Path) -> bool:
 def _annotate(request: Request, results: list[dict]) -> None:
     """Attach live state to each result: in Narratarr's library, current job, in Audiobookshelf."""
     db, _, jobs = _state(request)
-    asins = [r["asin"] for r in results if r.get("asin")]
+    keys = sorted({k for r in results for k in (r.get("asin"), r.get("ref")) if k})
     in_lib, in_queue = set(), {}
-    if asins:
-        marks = ",".join("?" * len(asins))
-        in_lib = {r["asin"] for r in db.query(f"SELECT asin FROM library WHERE asin IN ({marks})", asins)}
-        for r in db.query(f"SELECT id, asin, status FROM jobs WHERE asin IN ({marks}) ORDER BY id", asins):
+    if keys:
+        marks = ",".join("?" * len(keys))
+        in_lib = {r["asin"] for r in db.query(f"SELECT asin FROM library WHERE asin IN ({marks})", keys)}
+        for r in db.query(f"SELECT id, asin, status FROM jobs WHERE asin IN ({marks}) ORDER BY id", keys):
             in_queue[r["asin"]] = {"id": r["id"], "status": r["status"]}
     abs_sync = jobs.abs
     for r in results:
-        r["in_library"] = r.get("asin") in in_lib
-        r["job"] = in_queue.get(r.get("asin"))
+        r["in_library"] = bool({r.get("asin"), r.get("ref")} & in_lib)
+        r["job"] = in_queue.get(r.get("ref")) or in_queue.get(r.get("asin"))
         r["in_abs"] = _abs_ref(abs_sync, abs_sync.lookup(r.get("asin"), r.get("title"),
                                                           (r.get("authors") or [{}])[0].get("name"))) \
             if abs_sync.enabled else None
@@ -92,21 +92,24 @@ def _annotate(request: Request, results: list[dict]) -> None:
 @router.get("/search")
 async def search(request: Request, q: str = Query(..., min_length=1), limit: int = 30):
     s = _state(request)[1]
+    hub = get_provider(s)
     try:
-        results = await get_provider(s).search(q, limit)
-    except httpx.HTTPError as e:
+        results, info = await hub.search_ex(q, limit)
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Lookup failed: {e}") from e
     _annotate(request, results)
-    return {"results": results, "region": results[0]["region"] if results else s.get("metadata.region")}
+    return {"results": results, "sources": info["sources"], "configured_sources": hub.source_count,
+            "fallback": info["fallback"], "region": s.get("metadata.region")}
 
 
 @router.post("/search/status")
 async def search_status(request: Request, payload: dict = Body(...)):
-    """Refresh library/queue/Audiobookshelf state for results already on screen (no Audible call)."""
-    items = [{"asin": i.get("asin"), "title": i.get("title"), "authors": i.get("authors") or []}
-             for i in (payload.get("items") or [])[:100] if i.get("asin")]
+    """Refresh library/queue/Audiobookshelf state for results already on screen (no metadata lookups)."""
+    items = [{"asin": i.get("asin"), "ref": i.get("ref") or i.get("asin"), "title": i.get("title"),
+              "authors": i.get("authors") or []}
+             for i in (payload.get("items") or [])[:100] if i.get("ref") or i.get("asin")]
     _annotate(request, items)
-    return {i["asin"]: {"in_library": i["in_library"], "job": i["job"], "in_abs": i["in_abs"]} for i in items}
+    return {i["ref"]: {"in_library": i["in_library"], "job": i["job"], "in_abs": i["in_abs"]} for i in items}
 
 
 # --------------------------------------------------------------------- jobs
@@ -127,16 +130,16 @@ async def list_jobs(request: Request, scope: str = "all"):
 @router.post("/jobs")
 async def create_job(request: Request, payload: dict = Body(...), user: User = Depends(current_user)):
     _, s, jobs = _state(request)
-    asin = payload.get("asin")
-    if not asin:
-        raise HTTPException(400, "asin required")
-    if (existing := jobs.find_active(asin)):
+    ref = payload.get("ref") or payload.get("asin")
+    if not ref:
+        raise HTTPException(400, "ref or asin required")
+    if (existing := jobs.find_active(ref)) or (payload.get("asin") and (existing := jobs.find_active(payload["asin"]))):
         raise HTTPException(409, f"Already in the queue (job {existing['id']})")
     book = payload.get("book")
-    if not book or book.get("asin") != asin:
-        book = await full_metadata(s, asin, payload.get("region"))
+    if not book or (book.get("ref") or book.get("asin")) != ref:
+        book = await full_metadata(s, ref, payload.get("region"))
         if not book:
-            raise HTTPException(404, "ASIN not found in the configured regions")
+            raise HTTPException(404, "Not found in the configured metadata sources")
     jid = jobs.create_download(book, user.id)
     return jobs.get(jid)
 
@@ -412,14 +415,16 @@ async def do_import(request: Request, payload: dict = Body(...), user: User = De
     mode = payload.get("mode", "move")
     if mode not in ("move", "copy"):
         raise HTTPException(400, "mode must be move or copy")
+    ref = payload.get("ref") or payload.get("asin")
+    if not ref:
+        raise HTTPException(400, "ref or asin required")
     book = payload.get("book")
-    if not book or book.get("asin") != payload.get("asin"):
-        book = await full_metadata(s, payload["asin"], payload.get("region"))
-    elif s.get("metadata.use_audnexus"):
-        enriched = await full_metadata(s, payload["asin"], book.get("region"))
-        book = enriched or book
+    if not book or (book.get("ref") or book.get("asin")) != ref:
+        book = await full_metadata(s, ref, payload.get("region"))
+    else:
+        book = (await full_metadata(s, ref, book.get("region"))) or book
     if not book:
-        raise HTTPException(404, "ASIN not found")
+        raise HTTPException(404, "Not found in the configured metadata sources")
     jid = jobs.create_import(book, target, mode, user.id)
     return jobs.get(jid)
 
@@ -456,9 +461,28 @@ async def test_connection(request: Request, target: str):
             if not path.exists():
                 msg += f" · ⚠ downloads folder {path} isn't mounted here"
             return {"ok": ok, "message": msg, "detail": st}
-        if target == "audible":
-            res = await get_provider(s).search("project hail mary", 3)
-            return {"ok": bool(res), "message": f"{len(res)} results from region {res[0]['region'] if res else '—'}"}
+        if target == "metadata":
+            from .providers.hardcover import HardcoverProvider
+            hub = get_provider(s)
+            parts, ok = [], True
+            try:
+                await hub.audible.search("history", 3)
+                parts.append(f"Audible: OK ({s.get('metadata.region').upper()})")
+            except Exception as e:  # noqa: BLE001
+                parts.append(f"Audible: failed ({e})")
+                ok = False
+            if s.get("metadata.hardcover_enabled"):
+                if not s.get("metadata.hardcover_token"):
+                    parts.append("Hardcover: enabled but no API key")
+                    ok = False
+                else:
+                    try:
+                        await HardcoverProvider(s.get("metadata.hardcover_token")).search("history", 3)
+                        parts.append("Hardcover: OK")
+                    except Exception as e:  # noqa: BLE001
+                        parts.append(f"Hardcover: failed ({e})")
+                        ok = False
+            return {"ok": ok, "message": " · ".join(parts)}
         if target == "abs":
             jobs = _state(request)[2]
             libs = await AbsClient(s.get("abs.url"), s.get("abs.token")).libraries()
