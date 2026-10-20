@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Narratarr</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/search" data-link>
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 3h13l6 6v20H7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M20 3v6h6" fill="currentColor" opacity=".35" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 15v8M15.5 13v10M19 16v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Narratarr</span>
+      </a>
+      <nav>
+        <a href="/search" data-link data-page="search">Search</a>
+        <a href="/queue" data-link data-page="queue">Queue <span class="badge" id="queue-badge" hidden></span></a>
+        <a href="/library" data-link data-page="library">Library</a>
+        <a href="/import" data-link data-page="import">Manual Import</a>
+        <a href="/settings" data-link data-page="settings">Settings</a>
+      </nav>
+      <div class="sidebar-foot" id="sidebar-foot"></div>
+    </aside>
+    <main id="view" tabindex="-1"></main>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toasts" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

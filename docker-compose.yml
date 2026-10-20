@@ -1,0 +1,21 @@
+services:
+  narratarr:
+    image: ghcr.io/joshbosh/narratarr:latest
+    container_name: narratarr
+    restart: unless-stopped
+    # Run as the same UID:GID that owns slskd's downloads and your audiobook library,
+    # so Narratarr can move finished files and Audiobookshelf can read them.
+    user: "1000:1000"
+    ports:
+      - "8787:8787"
+    environment:
+      TZ: Etc/UTC
+      # Optional first-run defaults; everything is editable on the Settings page.
+      NARRATARR_SLSKD__URL: http://slskd:5030
+      NARRATARR_SLSKD__API_KEY: change-me
+      NARRATARR_METADATA__REGION: us
+    volumes:
+      - ./config:/config                                  # database + settings
+      - ./downloads:/downloads                            # incomplete/ and completed/
+      - /path/to/slskd/downloads:/slskd-downloads         # slskd's completed-downloads folder
+      - /path/to/audiobooks:/audiobooks                   # optional: your Audiobookshelf library folder

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+# local runtime data
+config/
+downloads/
+mockdata/
+realdata/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+Thumbs.db
