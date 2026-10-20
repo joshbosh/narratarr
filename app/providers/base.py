@@ -62,6 +62,35 @@ def html_to_text(value: str | None) -> str | None:
     return s.strip() or None
 
 
+# Audible appends roles to contributor names: "Lawrence Krauss - editor", "Jane Doe - translator",
+# occasionally "Jane Doe (Editor)". Roles start lowercase after the dash, which keeps hyphenated
+# names like "Jean-Paul Sartre" or "Smith - Jones" intact.
+_ROLE_DASH = re.compile(r"^(?P<name>.+?)\s+[-\u2013\u2014]\s+(?P<role>[a-z][a-z /&,.'-]*)$")
+_ROLE_PAREN = re.compile(r"^(?P<name>.+?)\s*\((?P<role>editor|editors|translator|foreword|introduction|afterword|"
+                         r"contributor|adapter|adaptation|illustrator|compiler|narrator)\)$", re.I)
+
+
+def split_role(name: str | None) -> tuple[str, str | None]:
+    """'Lawrence Krauss - editor' → ('Lawrence Krauss', 'editor')."""
+    n = (name or "").strip()
+    m = _ROLE_DASH.match(n) or _ROLE_PAREN.match(n)
+    if m:
+        return m.group("name").strip(), m.group("role").strip().lower()
+    return n, None
+
+
+def clean_contributors(book: dict) -> dict:
+    """Normalise author/narrator names in a stored book (also fixes jobs saved before role parsing)."""
+    authors = []
+    for a in book.get("authors") or []:
+        name, role = split_role(a.get("name"))
+        if name:
+            authors.append({**a, "name": name, "role": a.get("role") or role})
+    book["authors"] = authors
+    book["narrators"] = [n for n in (split_role(x)[0] for x in book.get("narrators") or []) if n]
+    return book
+
+
 def primary_series(book: dict) -> dict | None:
     return book["series"][0] if book.get("series") else None
 

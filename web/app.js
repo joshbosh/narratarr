@@ -140,18 +140,33 @@ function renderSearch(view) {
   const results = h("div", { class: "results" });
   const info = h("div", { class: "muted", style: { marginBottom: "10px" } });
   const form = h("form", { class: "searchbar", onsubmit: (e) => { e.preventDefault(); run(); } }, input, h("button", { class: "btn primary" }, "Search"));
+  let seq = 0;      // ignores responses from searches that were superseded or cleared
+  let rows = [];    // [{ book, setState }] for live status updates
+
+  function clear() {
+    seq++;
+    lastSearch = { q: "", results: null };
+    rows = [];
+    info.textContent = "";
+    results.replaceChildren();
+  }
+  // The search box's ✕ (and deleting all the text) resets the page
+  input.addEventListener("input", () => { if (!input.value.trim()) clear(); });
 
   async function run() {
     const q = input.value.trim();
-    if (!q) return;
+    if (!q) { clear(); return; }
+    const mine = ++seq;
     lastSearch.q = q;
     results.replaceChildren(h("div", { class: "muted" }, h("span", { class: "spinner" }), "  Searching Audible…"));
     info.textContent = "";
     try {
       const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if (mine !== seq) return;
       lastSearch.results = data;
       draw(data);
     } catch (e) {
+      if (mine !== seq) return;
       results.replaceChildren(h("div", { class: "empty" }, h("b", {}, "Lookup failed"), e.message));
     }
   }
@@ -159,15 +174,35 @@ function renderSearch(view) {
   function draw(data) {
     const list = data.results || [];
     info.textContent = list.length ? `${list.length} results · ${data.region.toUpperCase()} store` : "";
-    if (!list.length) { results.replaceChildren(h("div", { class: "empty" }, h("b", {}, "No matches"), "Try fewer words, or search by ASIN.")); return; }
-    results.replaceChildren(...list.map(resultRow));
+    if (!list.length) { rows = []; results.replaceChildren(h("div", { class: "empty" }, h("b", {}, "No matches"), "Try fewer words, or search by ASIN.")); return; }
+    rows = list.map((b) => ({ book: b, ...resultRow(b) }));
+    results.replaceChildren(...rows.map((r) => r.el));
+  }
+
+  // Keep queued / in-library / Audiobookshelf badges current (removed jobs, finished downloads…)
+  async function refreshStatus() {
+    if (!rows.length) return;
+    const mine = seq;
+    try {
+      const st = await api("/api/search/status", { method: "POST", body: { items: rows.map((r) => ({ asin: r.book.asin, title: r.book.title, authors: r.book.authors })) } });
+      if (mine !== seq) return;
+      for (const r of rows) {
+        const x = st[r.book.asin];
+        if (!x) continue;
+        const changed = JSON.stringify([r.book.in_library, r.book.job, r.book.in_abs]) !== JSON.stringify([x.in_library, x.job, x.in_abs]);
+        Object.assign(r.book, x);
+        if (changed) r.setState();
+      }
+    } catch { /* ignore */ }
   }
 
   view.append(
     h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Search"), h("div", { class: "sub" }, "Find a release on Audible, then request it from Soulseek."))),
     form, info, results,
   );
-  if (lastSearch.results) draw(lastSearch.results);
+  if (lastSearch.results) { draw(lastSearch.results); refreshStatus(); }
+  const timer = setInterval(refreshStatus, 4000);
+  pageCleanup = () => clearInterval(timer);
 }
 
 function resultRow(b) {
@@ -197,9 +232,9 @@ function resultRow(b) {
     setState();
   }
   setState();
-  const desc = b.description ? h("div", { class: "desc", onclick: (e) => e.currentTarget.classList.toggle("open") }, b.description) : null;
+  const descEl = b.description ? h("div", { class: "desc", onclick: (e) => e.currentTarget.classList.toggle("open") }, b.description) : null;
   const abridged = b.format && b.format.toLowerCase() === "abridged";
-  return h("article", { class: "result" },
+  const el = h("article", { class: "result" },
     cover(b.cover_url, b.title),
     h("div", {},
       h("div", { class: "title" }, b.title),
@@ -214,8 +249,9 @@ function resultRow(b) {
         abridged ? h("span", { class: "pill warn" }, "Abridged") : null,
         h("span", { class: "pill region" }, b.region),
         h("span", { class: "pill mono" }, b.asin)),
-      desc),
+      descEl),
     act);
+  return { el, setState };
 }
 
 // =================================================================== QUEUE
@@ -277,10 +313,25 @@ async function openJob(id, onChange) {
   const headerEl = h("header", {});
   openModal(h("div", { class: "modal" }, headerEl, body), () => onChange && onChange());
   let timer = null;
+  // Built once, outside the refresh, so polling never steals focus or wipes what you're typing.
+  const q = h("input", { type: "text", placeholder: "Custom slskd search, e.g. author title" });
+  const searchBtn = h("button", { class: "btn" }, "Search slskd");
+  const customForm = h("form", { class: "row", style: { marginTop: "14px" }, onsubmit: async (e) => {
+    e.preventDefault();
+    const query = q.value.trim();
+    if (query.length < 3) { toast("Type at least 3 characters", "bad"); return; }
+    searchBtn.disabled = true;
+    try { await api(`/api/jobs/${id}/search`, { method: "POST", body: { query } }); toast("Searching…"); load(); }
+    catch (err) { toast(err.message, "bad"); }
+    searchBtn.disabled = false;
+  } }, h("div", { class: "grow" }, q), searchBtn);
+  const dynamic = h("div", {});
+  let shown = false;
+
 
   async function load() {
     let j;
-    try { j = await api(`/api/jobs/${id}`); } catch (e) { body.replaceChildren(h("div", { class: "empty" }, e.message)); return; }
+    try { j = await api(`/api/jobs/${id}`); } catch (e) { shown = false; body.replaceChildren(h("div", { class: "empty" }, e.message)); return; }
     headerEl.replaceChildren(
       cover(j.cover_url, j.title),
       h("div", {},
@@ -289,12 +340,6 @@ async function openJob(id, onChange) {
         h("div", { class: "muted" }, names(j.authors), j.narrators?.length ? ` · read by ${names(j.narrators)}` : "", j.runtime_min ? ` · ${fmtRuntime(j.runtime_min)}` : "", j.asin ? ` · ${j.asin}` : ""),
         h("div", { class: "detail muted", style: { marginTop: "6px", fontSize: "13px" } }, j.error || j.detail)),
       h("button", { class: "btn ghost close", onclick: closeModal }, "✕"));
-
-    const q = h("input", { type: "text", placeholder: "Custom slskd search, e.g. author title" });
-    const customForm = h("form", { class: "row", style: { marginTop: "14px" }, onsubmit: async (e) => {
-      e.preventDefault();
-      try { await api(`/api/jobs/${id}/search`, { method: "POST", body: { query: q.value } }); toast("Searching…"); load(); } catch (err) { toast(err.message, "bad"); }
-    } }, h("div", { class: "grow" }, q), h("button", { class: "btn" }, "Search slskd"));
 
     const cands = j.candidates || [];
     const tried = new Set((j.selected && j.selected.tried) || []);
@@ -328,8 +373,8 @@ async function openJob(id, onChange) {
       h("thead", {}, h("tr", {}, ["Query", "Peers", "Folders", "Best"].map((t) => h("th", {}, t)))),
       h("tbody", {}, j.attempts.map((a) => h("tr", {}, h("td", { class: "mono" }, a.query), h("td", {}, a.responses), h("td", {}, a.candidates), h("td", {}, scoreEl(a.best)))))) : null;
 
-    body.replaceChildren(...[
-      customForm,
+    if (!shown) { body.replaceChildren(customForm, dynamic); shown = true; }
+    dynamic.replaceChildren(...[
       transfers ? [h("h3", {}, "Transfers"), transfers] : null,
       h("h3", {}, `Candidates (${cands.length})`), table,
       attempts ? [h("h3", {}, "Searches"), attempts] : null,

@@ -21,6 +21,7 @@ from . import matching
 from .integrations.abs import AbsSync
 from .postprocess import process_book, safe_segment
 from .providers import full_metadata, get_provider
+from .providers.base import clean_contributors
 from .slskd import SlskdBusy, SlskdClient, SlskdError, transfer_failed, transfer_succeeded
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,8 @@ class JobManager:
         self._busy: set[int] = set()
         self.abs = AbsSync(db, settings)
         self._abs_inflight: set[int] = set()
+        self._search_tasks: dict[int, asyncio.Task] = {}   # job id → running search (loop or custom)
+        self._enqueuing: set[int] = set()                   # job ids with an slskd enqueue in flight
 
     # ------------------------------------------------------------------ infra
     def slskd(self) -> SlskdClient:
@@ -93,6 +96,7 @@ class JobManager:
         return self.db.one(f"SELECT * FROM jobs WHERE asin=? AND status IN ({marks})", (asin, *ACTIVE))
 
     def create_download(self, book: dict, user_id: str | None = None) -> int:
+        book = clean_contributors(dict(book))
         s = _book_summary(book)
         now = time.time()
         jid = self.db.insert("jobs", {
@@ -104,6 +108,7 @@ class JobManager:
         return jid
 
     def create_import(self, book: dict, path: Path, mode: str, user_id: str | None = None) -> int:
+        book = clean_contributors(dict(book))
         s = _book_summary(book)
         now = time.time()
         jid = self.db.insert("jobs", {
@@ -127,7 +132,22 @@ class JobManager:
                     except asyncio.TimeoutError:
                         pass
                     continue
-                await self.run_search(job["id"])
+                task = asyncio.create_task(self.run_search(job["id"]), name=f"search-{job['id']}")
+                self._search_tasks[job["id"]] = task
+                try:
+                    # asyncio.wait doesn't raise if the *task* is cancelled (job removed), only if
+                    # this loop itself is being shut down.
+                    await asyncio.wait({task})
+                except asyncio.CancelledError:
+                    task.cancel()
+                    raise
+                finally:
+                    if self._search_tasks.get(job["id"]) is task:
+                        self._search_tasks.pop(job["id"], None)
+                if task.cancelled():
+                    log.info("search for job %s stopped (job cancelled or removed)", job["id"])
+                elif task.exception():
+                    log.error("search for job %s failed", job["id"], exc_info=task.exception())
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -135,7 +155,7 @@ class JobManager:
                 await asyncio.sleep(5)
 
     async def _prepare_book(self, job: dict) -> tuple[dict, list[str]]:
-        book = job["book"]
+        book = clean_contributors(job["book"])
         if book.get("asin") and not book.get("_enriched"):
             try:
                 full = await full_metadata(self.settings, book["asin"], book.get("region"))
@@ -144,6 +164,7 @@ class JobManager:
             except Exception as e:  # noqa: BLE001
                 self.log(job["id"], f"Metadata enrichment failed: {e}")
             book["_enriched"] = True
+            book = clean_contributors(book)
             self.update(job["id"], book=book, **_book_summary(book))
             if book.get("chapters"):
                 self.log(job["id"], f"Audible chapter data: {len(book['chapters'])} chapters")
@@ -152,7 +173,7 @@ class JobManager:
         if "_alt_narrators" not in book and book.get("authors"):
             try:
                 st = matching.short_title(book["title"])
-                results = await get_provider(self.settings).search(f"{st} {book['authors'][0]['name']}", 20)
+                results = await get_provider(self.settings).search(f"{st} {matching.primary_author(book)}", 20)
                 for r in results:
                     if r.get("asin") != book.get("asin") and \
                             fuzz.ratio(matching.norm(matching.short_title(r["title"])), matching.norm(st)) >= 90:
@@ -231,7 +252,7 @@ class JobManager:
             return
         viable = [c for c in candidates if c["id"] not in tried]
         if not force_review and viable and viable[0]["score"] >= min_score and self.settings.get("matching.auto_download"):
-            await self.start_download(job_id, viable[0]["id"], auto=True)
+            self._spawn_download(job_id, viable[0], auto=True)
         elif not candidates:
             self.update(job_id, status="needs_review", detail="No results on Soulseek — try a custom search")
             self.log(job_id, "Nothing found")
@@ -241,8 +262,30 @@ class JobManager:
                         detail=f"{len(candidates)} candidates, best {best:.0f} — pick one")
 
     # ---------------------------------------------------------------- download
+    def _spawn_download(self, job_id: int, cand: dict, auto: bool) -> None:
+        """Queue the download in the background so a slow slskd enqueue doesn't hold up the next search."""
+        job = self.get(job_id)
+        sel = {k: v for k, v in cand.items() if k != "files"}
+        sel.update({"tried": (job.get("selected") or {}).get("tried") or [], "pending": cand["id"],
+                    "pending_auto": auto, "retry_at": time.time() + 300})  # watchdog if the enqueue never returns
+        self.update(job_id, status="downloading", transfers=[], selected=sel, progress=0,
+                    detail=f"Queueing {cand['file_count']} file(s) with {cand['username']}")
+        self._enqueuing.add(job_id)
+
+        async def go():
+            try:
+                await self.start_download(job_id, cand["id"], auto=auto)
+            except Exception as e:  # noqa: BLE001
+                log.exception("start_download failed for job %s", job_id)
+                self.log(job_id, f"Couldn't queue the download: {e}")
+            finally:
+                self._enqueuing.discard(job_id)
+        asyncio.create_task(go(), name=f"enqueue-{job_id}")
+
     async def start_download(self, job_id: int, candidate_id: str, auto: bool = False) -> None:
         job = self.get(job_id)
+        if not job or job["status"] == "cancelled":
+            return
         cand = next((c for c in job.get("candidates") or [] if c["id"] == candidate_id), None)
         if not cand:
             raise ValueError("Candidate not found")
@@ -257,6 +300,9 @@ class JobManager:
         client = self.slskd()
         try:
             for rel, files in by_rel.items():
+                cur = self.get(job_id)
+                if not cur or cur["status"] == "cancelled":
+                    break                      # removed while earlier discs were being queued
                 dest = "/".join(["narratarr", str(job_id)] + ([rel] if rel else []))
                 mode = await client.enqueue(cand["username"], files, dest)
                 for f in files:
@@ -284,6 +330,14 @@ class JobManager:
             tried.append(cand["id"])
             self.update(job_id, selected={**cand, "files": None, "tried": tried})
             await self._next_candidate(job_id, f"enqueue failed: {e}")
+            return
+        latest = self.get(job_id)
+        if not latest or latest["status"] == "cancelled":
+            # removed while slskd was queueing it — take the transfers back out
+            for t in transfers:
+                for r in await client.user_downloads(t["username"]):
+                    if r.get("filename") == t["filename"] and r.get("id"):
+                        await client.cancel(t["username"], r["id"], remove=True)
             return
         now = time.time()
         selected = {k: v for k, v in cand.items() if k != "files"}
@@ -364,7 +418,7 @@ class JobManager:
         transfers = job.get("transfers") or []
         selected = job.get("selected") or {}
         if not transfers:
-            if selected.get("pending") and time.time() >= selected.get("retry_at", 0):
+            if selected.get("pending") and job_id not in self._enqueuing and time.time() >= selected.get("retry_at", 0):
                 await self.start_download(job_id, selected["pending"], auto=selected.get("pending_auto", True))
             return
         client = self.slskd()
@@ -456,7 +510,7 @@ class JobManager:
     async def run_processing(self, job_id: int) -> None:
         job = self.get(job_id)
         src = Path(job["staging_path"] or self.staging_dir(job))
-        book = {k: v for k, v in job["book"].items()}
+        book = clean_contributors({k: v for k, v in job["book"].items()})
         try:
             if job["kind"] == "download" and not book.get("_enriched") and book.get("asin"):
                 book, _ = await self._prepare_book(job)
@@ -610,11 +664,15 @@ class JobManager:
         job = self.get(job_id)
         if not job:
             return
+        task = self._search_tasks.pop(job_id, None)
+        if task and not task.done():
+            task.cancel()                       # stops the slskd search right away
         if job["status"] == "downloading":
             await self._cancel_transfers(job)
             self._clear_staging(job)
         self.update(job_id, status="cancelled", detail="Cancelled", transfers=[])
         self.log(job_id, "Cancelled")
+        self.wake.set()                         # let the next queued job start immediately
 
     def retry(self, job_id: int) -> None:
         job = self.get(job_id)
@@ -628,6 +686,14 @@ class JobManager:
                         candidates=[], selected=None, transfers=[], progress=0)
         self.log(job_id, "Retry requested")
         self.wake.set()
+
+    def start_custom_search(self, job_id: int, query: str) -> None:
+        old = self._search_tasks.get(job_id)
+        if old and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self.custom_search(job_id, query), name=f"custom-search-{job_id}")
+        self._search_tasks[job_id] = task
+        task.add_done_callback(lambda t: self._search_tasks.pop(job_id, None) if self._search_tasks.get(job_id) is t else None)
 
     async def custom_search(self, job_id: int, query: str) -> None:
         job = self.get(job_id)

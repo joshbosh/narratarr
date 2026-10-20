@@ -27,7 +27,7 @@ PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9100
 SRC = WORK / "src"
 DL = WORK / "slskd-downloads"
 BASE = f"http://127.0.0.1:{PORT}"
-CONFIG = {"batches": True, "busy": 0}
+CONFIG = {"batches": True, "busy": 0, "search_secs": 2, "enqueue_delay": 0}
 
 
 def ff(*args):
@@ -88,6 +88,8 @@ CATALOG = {
         product("B0SHELF001", "Shelf Bound", ["Abe Shelver"], ["Nia Reader"], 1, [("Shelf Saga", "3")]),
         product("B0EXIST001", "Existing Story", ["Old Author"], ["Prior Voice"], 1),
         product("B0CLASS001", "Shelf Classic", ["Ada Shelf"], ["Some Reader"], 1),
+        product("B0EDIT0001", "Essays On Rivers", ["Lena Krause - editor", "Omar Field - foreword"],
+                ["Contributing Authors", "Lena Krause"], 1),
     ],
     "us": [
         product("B0USONLY01", "American Exclusive", ["Usa Author"], ["Us Narrator"], 1),
@@ -112,6 +114,7 @@ SHARES = [
     # series dump folder containing several books
     ("dumppeer", "@@dump\\Jane Author\\Everything\\The Tiny Test.m4b", "single.m4b", 60, {}),
     ("dumppeer", "@@dump\\Jane Author\\Everything\\Some Other Book.m4b", "single.m4b", 60, {}),
+    ("essaypeer", "@@es\\Audiobooks\\Lena Krause\\Essays On Rivers\\Essays On Rivers.m4b", "single.m4b", 60, {}),
     ("shelfpeer", "@@sh\\Audiobooks\\Abe Shelver\\Shelf Saga 3 - Shelf Bound\\Shelf Bound.m4b", "single.m4b", 60, {}),
 ]
 
@@ -208,7 +211,7 @@ def search_state(sid: str):
     s = SEARCHES.get(sid) or {}
     if not s:
         raise HTTPException(404)
-    if time.time() - s["started"] > 2:
+    if time.time() - s["started"] > CONFIG["search_secs"]:
         s["state"], s["isComplete"] = "Completed, TimedOut", True
     return {k: v for k, v in s.items() if k != "responses"}
 
@@ -237,6 +240,8 @@ def _busy():
 
 
 def _enqueue(username: str, files: list[dict], dest: str | None):
+    if CONFIG["enqueue_delay"]:
+        time.sleep(CONFIG["enqueue_delay"])  # real slskd blocks while it connects to the peer
     lst = TRANSFERS.setdefault(username, [])
     for f in files:
         share = next(s for s in SHARES if s[1] == f["filename"])

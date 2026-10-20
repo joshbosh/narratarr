@@ -70,13 +70,9 @@ def _writable(p: Path) -> bool:
 
 
 # ------------------------------------------------------------------- search
-@router.get("/search")
-async def search(request: Request, q: str = Query(..., min_length=1), limit: int = 30):
-    db, s, _ = _state(request)
-    try:
-        results = await get_provider(s).search(q, limit)
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Lookup failed: {e}") from e
+def _annotate(request: Request, results: list[dict]) -> None:
+    """Attach live state to each result: in Narratarr's library, current job, in Audiobookshelf."""
+    db, _, jobs = _state(request)
     asins = [r["asin"] for r in results if r.get("asin")]
     in_lib, in_queue = set(), {}
     if asins:
@@ -84,14 +80,33 @@ async def search(request: Request, q: str = Query(..., min_length=1), limit: int
         in_lib = {r["asin"] for r in db.query(f"SELECT asin FROM library WHERE asin IN ({marks})", asins)}
         for r in db.query(f"SELECT id, asin, status FROM jobs WHERE asin IN ({marks}) ORDER BY id", asins):
             in_queue[r["asin"]] = {"id": r["id"], "status": r["status"]}
-    abs_sync = _state(request)[2].abs
+    abs_sync = jobs.abs
     for r in results:
         r["in_library"] = r.get("asin") in in_lib
         r["job"] = in_queue.get(r.get("asin"))
         r["in_abs"] = _abs_ref(abs_sync, abs_sync.lookup(r.get("asin"), r.get("title"),
                                                           (r.get("authors") or [{}])[0].get("name"))) \
             if abs_sync.enabled else None
+
+
+@router.get("/search")
+async def search(request: Request, q: str = Query(..., min_length=1), limit: int = 30):
+    s = _state(request)[1]
+    try:
+        results = await get_provider(s).search(q, limit)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Lookup failed: {e}") from e
+    _annotate(request, results)
     return {"results": results, "region": results[0]["region"] if results else s.get("metadata.region")}
+
+
+@router.post("/search/status")
+async def search_status(request: Request, payload: dict = Body(...)):
+    """Refresh library/queue/Audiobookshelf state for results already on screen (no Audible call)."""
+    items = [{"asin": i.get("asin"), "title": i.get("title"), "authors": i.get("authors") or []}
+             for i in (payload.get("items") or [])[:100] if i.get("asin")]
+    _annotate(request, items)
+    return {i["asin"]: {"in_library": i["in_library"], "job": i["job"], "in_abs": i["in_abs"]} for i in items}
 
 
 # --------------------------------------------------------------------- jobs
@@ -159,7 +174,7 @@ async def custom_search(request: Request, job_id: int, payload: dict = Body(...)
     if not jobs.get(job_id):
         raise HTTPException(404)
     jobs.update(job_id, status="searching", detail=f"Custom search: {query}")
-    asyncio.create_task(jobs.custom_search(job_id, query))
+    jobs.start_custom_search(job_id, query)
     return {"ok": True}
 
 

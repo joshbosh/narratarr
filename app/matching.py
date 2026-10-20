@@ -54,8 +54,38 @@ def short_title(title: str) -> str:
     return t.strip() or title.strip()
 
 
+# Narrator credits that aren't people; never use them as search words or match signals.
+NON_PERSON_NARRATORS = {"contributing authors", "various", "various narrators", "full cast", "a full cast",
+                        "uncredited", "anonymous", "the author", "author", "multiple narrators"}
+
+
+def person_name(name: str | None) -> str:
+    """Strip Audible role suffixes ('X - editor') from a contributor name."""
+    from .providers.base import split_role
+    return split_role(name)[0]
+
+
+def primary_author(book: dict) -> str:
+    """First author credited as an author (not editor/translator/foreword), else the first one listed."""
+    authors = book.get("authors") or []
+    for a in authors:
+        name, role = person_name(a.get("name")), a.get("role")
+        if not role and name and person_name(a.get("name")) == (a.get("name") or "").strip():
+            return name
+    return person_name(authors[0].get("name")) if authors else ""
+
+
+def narrator_names(book: dict) -> list[str]:
+    out = []
+    for n in book.get("narrators") or []:
+        n = person_name(n)
+        if n and norm(n) not in NON_PERSON_NARRATORS:
+            out.append(n)
+    return out
+
+
 def last_name(name: str | None) -> str:
-    toks = tokens(name or "")
+    toks = tokens(person_name(name))
     # skip suffixes like 'jr', 'iii'
     toks = [t for t in toks if t not in {"jr", "sr", "ii", "iii", "iv", "phd", "md"}]
     return toks[-1] if toks else ""
@@ -83,10 +113,10 @@ def build_queries(book: dict, limit: int = 6) -> list[str]:
     title = book.get("title") or ""
     st = short_title(title)
     st_sig = significant(st)
-    authors = [a["name"] for a in book.get("authors") or []]
-    author = authors[0] if authors else ""
+    author = primary_author(book)
     a_last = last_name(author)
-    narr_last = last_name((book.get("narrators") or [""])[0])
+    narrators = narrator_names(book)
+    narr_last = last_name(narrators[0]) if narrators else ""
     series = (book.get("series") or [None])[0]
 
     def q(*parts: str) -> str:
@@ -290,14 +320,14 @@ def score_candidate(cand: dict, book: dict, ctx: dict) -> None:
 def scoring_context(book: dict, formats: list[str], tolerance_pct: float, alt_narrators: list[str] | None = None) -> dict:
     st = short_title(book.get("title") or "")
     series = (book.get("series") or [None])[0]
-    narr = [last_name(n) for n in book.get("narrators") or [] if n]
-    alt = [last_name(n) for n in alt_narrators or [] if n]
+    narr = [last_name(n) for n in narrator_names(book)]
+    alt = [last_name(n) for n in alt_narrators or [] if n and norm(person_name(n)) not in NON_PERSON_NARRATORS]
     alt = [a for a in alt if a and a not in narr]
     title_l = (book.get("title") or "").lower()
     return {
         "short_title": st,
         "title_sig": significant(st),
-        "author_last": last_name((book.get("authors") or [{}])[0].get("name") if book.get("authors") else ""),
+        "author_last": last_name(primary_author(book)),
         "narrator_lasts": [n for n in narr if n],
         "alt_narrators": alt,
         "expected": _expected_seconds(book),
