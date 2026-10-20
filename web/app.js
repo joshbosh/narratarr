@@ -313,10 +313,25 @@ async function openJob(id, onChange) {
   const headerEl = h("header", {});
   openModal(h("div", { class: "modal" }, headerEl, body), () => onChange && onChange());
   let timer = null;
+  // Built once, outside the refresh, so polling never steals focus or wipes what you're typing.
+  const q = h("input", { type: "text", placeholder: "Custom slskd search, e.g. author title" });
+  const searchBtn = h("button", { class: "btn" }, "Search slskd");
+  const customForm = h("form", { class: "row", style: { marginTop: "14px" }, onsubmit: async (e) => {
+    e.preventDefault();
+    const query = q.value.trim();
+    if (query.length < 3) { toast("Type at least 3 characters", "bad"); return; }
+    searchBtn.disabled = true;
+    try { await api(`/api/jobs/${id}/search`, { method: "POST", body: { query } }); toast("Searching…"); load(); }
+    catch (err) { toast(err.message, "bad"); }
+    searchBtn.disabled = false;
+  } }, h("div", { class: "grow" }, q), searchBtn);
+  const dynamic = h("div", {});
+  let shown = false;
+
 
   async function load() {
     let j;
-    try { j = await api(`/api/jobs/${id}`); } catch (e) { body.replaceChildren(h("div", { class: "empty" }, e.message)); return; }
+    try { j = await api(`/api/jobs/${id}`); } catch (e) { shown = false; body.replaceChildren(h("div", { class: "empty" }, e.message)); return; }
     headerEl.replaceChildren(
       cover(j.cover_url, j.title),
       h("div", {},
@@ -325,12 +340,6 @@ async function openJob(id, onChange) {
         h("div", { class: "muted" }, names(j.authors), j.narrators?.length ? ` · read by ${names(j.narrators)}` : "", j.runtime_min ? ` · ${fmtRuntime(j.runtime_min)}` : "", j.asin ? ` · ${j.asin}` : ""),
         h("div", { class: "detail muted", style: { marginTop: "6px", fontSize: "13px" } }, j.error || j.detail)),
       h("button", { class: "btn ghost close", onclick: closeModal }, "✕"));
-
-    const q = h("input", { type: "text", placeholder: "Custom slskd search, e.g. author title" });
-    const customForm = h("form", { class: "row", style: { marginTop: "14px" }, onsubmit: async (e) => {
-      e.preventDefault();
-      try { await api(`/api/jobs/${id}/search`, { method: "POST", body: { query: q.value } }); toast("Searching…"); load(); } catch (err) { toast(err.message, "bad"); }
-    } }, h("div", { class: "grow" }, q), h("button", { class: "btn" }, "Search slskd"));
 
     const cands = j.candidates || [];
     const tried = new Set((j.selected && j.selected.tried) || []);
@@ -364,8 +373,8 @@ async function openJob(id, onChange) {
       h("thead", {}, h("tr", {}, ["Query", "Peers", "Folders", "Best"].map((t) => h("th", {}, t)))),
       h("tbody", {}, j.attempts.map((a) => h("tr", {}, h("td", { class: "mono" }, a.query), h("td", {}, a.responses), h("td", {}, a.candidates), h("td", {}, scoreEl(a.best)))))) : null;
 
-    body.replaceChildren(...[
-      customForm,
+    if (!shown) { body.replaceChildren(customForm, dynamic); shown = true; }
+    dynamic.replaceChildren(...[
       transfers ? [h("h3", {}, "Transfers"), transfers] : null,
       h("h3", {}, `Candidates (${cands.length})`), table,
       attempts ? [h("h3", {}, "Searches"), attempts] : null,
