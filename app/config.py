@@ -60,6 +60,11 @@ SCHEMA: list[Setting] = [
             "Used when the primary region has no results or doesn't carry an ASIN.",
             options=["", "au", "us", "uk", "ca", "de", "fr", "it", "es", "jp", "in"]),
     Setting("metadata.use_audnexus", True, "bool", "Enrich with Audnexus (genres, chapters)", "Metadata"),
+    Setting("metadata.hardcover_enabled", False, "bool", "Use Hardcover as a second source", "Metadata",
+            "Audible's values always win; Hardcover fills any gaps, adds books Audible doesn't have, "
+            "and is used on its own if Audible doesn't respond."),
+    Setting("metadata.hardcover_token", "", "secret", "Hardcover API key", "Metadata",
+            "Free — create one at hardcover.app/account/api. Paste it with or without the 'Bearer' prefix."),
     Setting("metadata.audnexus_url", "https://api.audnex.us", "str", "Audnexus URL", "Metadata"),
 
     # --- matching ----------------------------------------------------------

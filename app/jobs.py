@@ -35,7 +35,7 @@ BUSY_WAIT = int(os.environ.get("NARRATARR_BUSY_WAIT", "60"))  # seconds, × atte
 
 def _book_summary(book: dict) -> dict:
     return {
-        "asin": book.get("asin"), "region": book.get("region"), "title": book.get("title") or "Unknown",
+        "asin": book.get("asin") or book.get("ref"), "region": book.get("region"), "title": book.get("title") or "Unknown",
         "subtitle": book.get("subtitle"), "authors": book.get("authors") or [],
         "narrators": book.get("narrators") or [], "series": book.get("series") or [],
         "runtime_min": book.get("runtime_min"), "cover_url": book.get("cover_url"),
@@ -156,9 +156,10 @@ class JobManager:
 
     async def _prepare_book(self, job: dict) -> tuple[dict, list[str]]:
         book = clean_contributors(job["book"])
-        if book.get("asin") and not book.get("_enriched"):
+        ident = book.get("asin") or book.get("ref")
+        if ident and not book.get("_enriched"):
             try:
-                full = await full_metadata(self.settings, book["asin"], book.get("region"))
+                full = await full_metadata(self.settings, ident, book.get("region"))
                 if full:
                     book = {**book, **{k: v for k, v in full.items() if v not in (None, [], "")}}
             except Exception as e:  # noqa: BLE001
@@ -167,7 +168,9 @@ class JobManager:
             book = clean_contributors(book)
             self.update(job["id"], book=book, **_book_summary(book))
             if book.get("chapters"):
-                self.log(job["id"], f"Audible chapter data: {len(book['chapters'])} chapters")
+                self.log(job["id"], f"Chapter data: {len(book['chapters'])} chapters")
+            if book.get("filled_from"):
+                self.log(job["id"], "Filled from a second source: " + ", ".join(sorted(book["filled_from"])))
         # Other narrations of the same title help reject the wrong edition.
         alt: list[str] = book.get("_alt_narrators") or []
         if "_alt_narrators" not in book and book.get("authors"):
@@ -512,7 +515,7 @@ class JobManager:
         src = Path(job["staging_path"] or self.staging_dir(job))
         book = clean_contributors({k: v for k, v in job["book"].items()})
         try:
-            if job["kind"] == "download" and not book.get("_enriched") and book.get("asin"):
+            if job["kind"] == "download" and not book.get("_enriched") and (book.get("asin") or book.get("ref")):
                 book, _ = await self._prepare_book(job)
             self.update(job_id, detail="Tagging and organising")
             selected = job.get("selected") or {}

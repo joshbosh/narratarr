@@ -27,7 +27,7 @@ PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9100
 SRC = WORK / "src"
 DL = WORK / "slskd-downloads"
 BASE = f"http://127.0.0.1:{PORT}"
-CONFIG = {"batches": True, "busy": 0, "search_secs": 2, "enqueue_delay": 0}
+CONFIG = {"batches": True, "busy": 0, "search_secs": 2, "enqueue_delay": 0, "audible_down": False}
 
 
 def ff(*args):
@@ -88,6 +88,7 @@ CATALOG = {
         product("B0SHELF001", "Shelf Bound", ["Abe Shelver"], ["Nia Reader"], 1, [("Shelf Saga", "3")]),
         product("B0EXIST001", "Existing Story", ["Old Author"], ["Prior Voice"], 1),
         product("B0CLASS001", "Shelf Classic", ["Ada Shelf"], ["Some Reader"], 1),
+        {**product("B0GAP00001", "Gap Book", ["Gwen Gap"], [], 1), "publisher_summary": None, "series": []},
         product("B0EDIT0001", "Essays On Rivers", ["Lena Krause - editor", "Omar Field - foreword"],
                 ["Contributing Authors", "Lena Krause"], 1),
     ],
@@ -114,6 +115,7 @@ SHARES = [
     # series dump folder containing several books
     ("dumppeer", "@@dump\\Jane Author\\Everything\\The Tiny Test.m4b", "single.m4b", 60, {}),
     ("dumppeer", "@@dump\\Jane Author\\Everything\\Some Other Book.m4b", "single.m4b", 60, {}),
+    ("indiepeer", "@@in\\Audiobooks\\Ivy Indie\\Indie Tale\\Indie Tale.m4b", "single.m4b", 60, {}),
     ("essaypeer", "@@es\\Audiobooks\\Lena Krause\\Essays On Rivers\\Essays On Rivers.m4b", "single.m4b", 60, {}),
     ("shelfpeer", "@@sh\\Audiobooks\\Abe Shelver\\Shelf Saga 3 - Shelf Bound\\Shelf Bound.m4b", "single.m4b", 60, {}),
 ]
@@ -127,6 +129,8 @@ BATCH_DEST: dict[str, str] = {}
 # ------------------------------------------------------------------ Audible
 @app.get("/{region}/1.0/catalog/products")
 def search(region: str, keywords: str = ""):
+    if CONFIG["audible_down"]:
+        raise HTTPException(503)
     words = [w for w in re.split(r"\W+", keywords.lower()) if w]
     out = []
     for p in CATALOG.get(region, []):
@@ -138,6 +142,8 @@ def search(region: str, keywords: str = ""):
 
 @app.get("/{region}/1.0/catalog/products/{asin}")
 def get_product(region: str, asin: str):
+    if CONFIG["audible_down"]:
+        raise HTTPException(503)
     for p in CATALOG.get(region, []):
         if p["asin"] == asin:
             return {"product": p}
@@ -315,6 +321,56 @@ def cancel(username: str, tid: str, remove: bool = False):
             if remove:
                 t["removed"] = True
     return {}
+
+
+# ----------------------------------------------------------------- Hardcover
+def _hc_contrib(name, role=None):
+    return {"contribution": role, "author": {"name": name}}
+
+
+def _hc_book(bid, title, authors, narrators, asin, secs, series=None, desc=None, genres=None, isbn=None):
+    edition = {"id": bid * 10, "asin": asin, "isbn_13": isbn, "audio_seconds": secs, "release_date": "2020-03-01",
+               "reading_format_id": 2, "image": {"url": f"{BASE}/cover/hc{bid}.jpg"}, "publisher": {"name": "HC Press"},
+               "language": {"language": "English"},
+               "contributions": [_hc_contrib(n, "Narrator") for n in narrators]}
+    return {"id": bid, "title": title, "subtitle": None, "description": desc, "release_date": "2020-03-01",
+            "release_year": 2020, "slug": title.lower().replace(" ", "-"),
+            "cached_tags": {"Genre": [{"tag": g} for g in (genres or [])]},
+            "image": {"url": f"{BASE}/cover/hc{bid}.jpg"},
+            "contributions": [_hc_contrib(a) for a in authors],
+            "book_series": [{"position": series[1], "series": {"name": series[0]}}] if series else [],
+            "default_audio_edition": edition}
+
+
+HC_BOOKS = {
+    101: _hc_book(101, "The Tiny Test", ["Jane Author"], ["Ray Reader"], "B0TINY0001", 60, genres=["Fantasy"],
+                  isbn="9780000000101"),
+    102: _hc_book(102, "Gap Book", ["Gwen Gap"], ["Hal Cover"], "B0GAP00001", 60, series=("Gap Saga", 2.0),
+                  desc="<p>Description from Hardcover.</p>", genres=["Mystery"]),
+    103: _hc_book(103, "Indie Tale", ["Ivy Indie"], ["Nell Narr"], None, 60, genres=["Literary"]),
+}
+
+
+@app.post("/hardcover/v1/graphql")
+def hardcover(request: Request, body: dict = Body(...)):
+    if request.headers.get("authorization") != "Bearer hctoken":
+        return JSONResponse({"error": "Unable to verify token"}, status_code=401)
+    q, v = body.get("query", ""), body.get("variables") or {}
+    if "search(" in q:
+        words = [w for w in re.split(r"\W+", v.get("q", "").lower()) if w]
+        ids = [bid for bid, b in HC_BOOKS.items()
+               if all(w in (b["title"] + " " + " ".join(c["author"]["name"] for c in b["contributions"])).lower() for w in words)]
+        return {"data": {"search": {"ids": [str(i) for i in ids]}}}
+    if "books(" in q:
+        return {"data": {"books": [HC_BOOKS[i] for i in v.get("ids", []) if i in HC_BOOKS]}}
+    if "editions(" in q:
+        rows = []
+        for b in HC_BOOKS.values():
+            ed = b["default_audio_edition"]
+            if ed["asin"] and ed["asin"] == v.get("asin"):
+                rows.append({**ed, "book": b})
+        return {"data": {"editions": rows}}
+    return {"errors": [{"message": "unsupported query in mock"}]}
 
 
 # ------------------------------------------------------------ Audiobookshelf

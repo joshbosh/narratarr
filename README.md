@@ -20,7 +20,7 @@
 > very welcome.
 
 > [!IMPORTANT]
-> Narratarr is not affiliated with or endorsed by Audible, Amazon, Audnexus, slskd, Soulseek or Audiobookshelf. It uses
+> Narratarr is not affiliated with or endorsed by Audible, Amazon, Audnexus, Hardcover, slskd, Soulseek or Audiobookshelf. It uses
 > Audible's public, unauthenticated catalogue API, which is undocumented and can change without notice. You are
 > responsible for what you download: only fetch material you have the right to.
 
@@ -30,6 +30,8 @@
 
 - **Search** Audible's catalogue by title, author, narrator or ASIN. Each edition and narration is its own result, with author,
   narrator, series, runtime and region, plus whether it's already in your Audiobookshelf library.
+- **Optional second source: [Hardcover](https://hardcover.app).** Audible's metadata always wins; Hardcover fills any gaps,
+  adds books Audible doesn't list, and takes over if Audible doesn't respond. Off by default.
 - **Request** a release and Narratarr searches slskd with progressively looser queries. It groups results by folder
   (folding `CD1`/`Disc 2` sub-folders together), fuzzy-scores them against the Audible record, and downloads the best match.
   Runtime is the strongest signal, which separates abridged editions and different narrations.
@@ -215,6 +217,28 @@ library as separate sections.
 Each book folder also gets `cover.jpg`, `desc.txt`, `reader.txt`, `metadata.opf` and an Audiobookshelf-format
 `metadata.json`, so the scanner picks up the right metadata even without the API.
 
+## Metadata sources
+
+| Source | Default | Needs | Used for |
+|---|---|---|---|
+| Audible | On | Nothing | Primary source: search, ASIN lookups, region fallback (e.g. AU then US) |
+| Audnexus | On | Nothing | Adds genres, ISBN and the chapter list to Audible results |
+| [Hardcover](https://hardcover.app) | Off | A free API key | Fills gaps, adds books Audible doesn't list, backup when Audible doesn't respond |
+
+To turn on Hardcover:
+
+1. Sign in to Hardcover and create an API key at **[hardcover.app/account/api](https://hardcover.app/account/api)**. It's free.
+2. In *Settings → Metadata*, turn on **Use Hardcover as a second source**, paste the key (with or without the `Bearer`
+   prefix), and press **Save & test**.
+
+When both sources are on, each search queries both and compares the results. Matches are paired by ASIN or ISBN, or by
+title, author and narrator. For a matched book, Audible's values are kept and only empty fields (narrator, series,
+description, runtime and so on) are taken from Hardcover. Books only Hardcover knows about are listed after Audible's
+results. If Audible doesn't respond, searches and lookups use Hardcover on its own.
+
+Hardcover's API is in beta. Free keys allow 60 requests a minute, and each search uses two of them. Keys expire on the
+date you choose when creating them, so if searches stop returning Hardcover results, check the key first.
+
 ## How matching works
 
 For each request Narratarr builds up to six search queries, from most to least specific. Examples: *author + short
@@ -255,6 +279,8 @@ first-run default with an environment variable. The variable only applies until 
 | `NARRATARR_METADATA__FALLBACK_REGION` | Fallback Audible region | |
 | `NARRATARR_METADATA__USE_AUDNEXUS` | Enrich with Audnexus (genres, chapters) | `true` |
 | `NARRATARR_METADATA__AUDNEXUS_URL` | Audnexus URL | `https://api.audnex.us` |
+| `NARRATARR_METADATA__HARDCOVER_ENABLED` | Use Hardcover as a second source | `false` |
+| `NARRATARR_METADATA__HARDCOVER_TOKEN` | Hardcover API key | |
 | `NARRATARR_MATCHING__MIN_SCORE` | Auto-pick threshold (0-100) | `72` |
 | `NARRATARR_MATCHING__MAX_QUERIES` | Max search variations per book | `6` |
 | `NARRATARR_MATCHING__FORMATS` | Formats (preferred first) | `m4b,mp3,m4a,flac,opus,ogg` |
@@ -333,7 +359,7 @@ app/
   postprocess.py   organise, cover, sidecars
   tagging.py       mutagen tagging and chapter embedding
   library.py       library rescan, import folder discovery
-  providers/       metadata sources (Audible, Audnexus); add new ones here
+  providers/       metadata sources (Audible, Audnexus, Hardcover); add new ones here
   integrations/    Audiobookshelf
 web/               index.html, app.js, style.css (no build step)
 tests/             e2e.py and mock services
@@ -351,8 +377,8 @@ tests/             e2e.py and mock services
 
 ## Acknowledgements
 
-[slskd](https://github.com/slskd/slskd), [Audiobookshelf](https://github.com/advplyr/audiobookshelf) and
-[Audnexus](https://github.com/laxamentumtech/audnexus), which this builds on. Also the
+[slskd](https://github.com/slskd/slskd), [Audiobookshelf](https://github.com/advplyr/audiobookshelf),
+[Audnexus](https://github.com/laxamentumtech/audnexus) and [Hardcover](https://hardcover.app), which this builds on. Also the
 *arr projects for the general idea.
 
 ## License

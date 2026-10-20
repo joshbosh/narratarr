@@ -47,7 +47,7 @@ def significant(s: str) -> list[str]:
 
 
 def short_title(title: str) -> str:
-    """'Leviathan Wakes: The Expanse, Book 1' → 'Leviathan Wakes'."""
+    """'The Example Title: A Saga, Book 1' → 'The Example Title'."""
     t = re.split(r"\s*[:–—]\s+|\s+-\s+", title, maxsplit=1)[0]
     t = re.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*", " ", t)
     t = re.sub(r",?\s*(?:book|volume|vol\.?)\s*\d+\s*$", "", t, flags=re.I)

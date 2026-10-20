@@ -158,7 +158,7 @@ function renderSearch(view) {
     if (!q) { clear(); return; }
     const mine = ++seq;
     lastSearch.q = q;
-    results.replaceChildren(h("div", { class: "muted" }, h("span", { class: "spinner" }), "  Searching Audible…"));
+    results.replaceChildren(h("div", { class: "muted" }, h("span", { class: "spinner" }), "  Searching…"));
     info.textContent = "";
     try {
       const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
@@ -173,7 +173,10 @@ function renderSearch(view) {
 
   function draw(data) {
     const list = data.results || [];
-    info.textContent = list.length ? `${list.length} results · ${data.region.toUpperCase()} store` : "";
+    const srcs = `from ${data.sources} source${data.sources === 1 ? "" : "s"}`;
+    info.textContent = list.length ? `${list.length} result${list.length === 1 ? "" : "s"} ${srcs}` +
+      (data.fallback ? " · primary source didn't respond, showing backup source only" : "") : "";
+    lastSearch.multi = data.configured_sources > 1;
     if (!list.length) { rows = []; results.replaceChildren(h("div", { class: "empty" }, h("b", {}, "No matches"), "Try fewer words, or search by ASIN.")); return; }
     rows = list.map((b) => ({ book: b, ...resultRow(b) }));
     results.replaceChildren(...rows.map((r) => r.el));
@@ -184,10 +187,10 @@ function renderSearch(view) {
     if (!rows.length) return;
     const mine = seq;
     try {
-      const st = await api("/api/search/status", { method: "POST", body: { items: rows.map((r) => ({ asin: r.book.asin, title: r.book.title, authors: r.book.authors })) } });
+      const st = await api("/api/search/status", { method: "POST", body: { items: rows.map((r) => ({ asin: r.book.asin, ref: r.book.ref, title: r.book.title, authors: r.book.authors })) } });
       if (mine !== seq) return;
       for (const r of rows) {
-        const x = st[r.book.asin];
+        const x = st[r.book.ref || r.book.asin];
         if (!x) continue;
         const changed = JSON.stringify([r.book.in_library, r.book.job, r.book.in_abs]) !== JSON.stringify([x.in_library, x.job, x.in_abs]);
         Object.assign(r.book, x);
@@ -197,7 +200,7 @@ function renderSearch(view) {
   }
 
   view.append(
-    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Search"), h("div", { class: "sub" }, "Find a release on Audible, then request it from Soulseek."))),
+    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Search"), h("div", { class: "sub" }, "Find a release, then request it from Soulseek."))),
     form, info, results,
   );
   if (lastSearch.results) { draw(lastSearch.results); refreshStatus(); }
@@ -224,7 +227,7 @@ function resultRow(b) {
     }
     btnEl.disabled = true;
     try {
-      const job = await api("/api/jobs", { method: "POST", body: { asin: b.asin, region: b.region, book: b } });
+      const job = await api("/api/jobs", { method: "POST", body: { asin: b.asin, ref: b.ref, region: b.region, book: b } });
       b.job = { id: job.id, status: job.status };
       toast(`Queued “${b.title}”`, "ok");
       refreshBadge();
@@ -247,8 +250,9 @@ function resultRow(b) {
         fmtRuntime(b.runtime_min) ? h("span", { class: "pill" }, fmtRuntime(b.runtime_min)) : null,
         b.year ? h("span", { class: "pill" }, b.year) : null,
         abridged ? h("span", { class: "pill warn" }, "Abridged") : null,
-        h("span", { class: "pill region" }, b.region),
-        h("span", { class: "pill mono" }, b.asin)),
+        b.region ? h("span", { class: "pill region" }, b.region) : null,
+        b.asin ? h("span", { class: "pill mono" }, b.asin) : null,
+        lastSearch.multi && b.sources ? h("span", { class: "pill", title: "Metadata sources for this result" }, `${b.sources.length} source${b.sources.length === 1 ? "" : "s"}`) : null),
       descEl),
     act);
   return { el, setState };
@@ -545,11 +549,11 @@ let importRoot = "incomplete";
 function renderImport(view) {
   const rootTabs = h("div", { class: "tabs" });
   const folders = h("div", {});
-  const matchPanel = h("div", { class: "panel" }, h("div", { class: "muted" }, "Pick a folder on the left to match it to an Audible release."));
+  const matchPanel = h("div", { class: "panel" }, h("div", { class: "muted" }, "Pick a folder on the left to match it to a release."));
   let current = null;
 
   view.append(
-    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Manual Import"), h("div", { class: "sub" }, "Match a folder of audio to an Audible release, then tag and file it into completed/.")),
+    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Manual Import"), h("div", { class: "sub" }, "Match a folder of audio to a release, then tag and file it into completed/.")),
       h("div", { class: "row" }, rootTabs, h("button", { class: "btn small ghost", onclick: () => loadFolders() }, "Refresh"))),
     h("div", { class: "split" }, h("div", { class: "panel", style: { padding: "8px" } }, folders), matchPanel));
 
@@ -592,12 +596,12 @@ function renderImport(view) {
           h("div", {},
             h("div", { class: "t" }, b.title),
             h("div", { class: "muted", style: { fontSize: "12.5px" } }, names(b.authors), b.narrators?.length ? ` · read by ${names(b.narrators)}` : ""),
-            h("div", { class: "faint", style: { fontSize: "12px" } }, [b.series?.[0] ? seriesLabel(b.series[0]) : null, fmtRuntime(b.runtime_min), b.year, b.region.toUpperCase()].filter(Boolean).join(" · ")),
+            h("div", { class: "faint", style: { fontSize: "12px" } }, [b.series?.[0] ? seriesLabel(b.series[0]) : null, fmtRuntime(b.runtime_min), b.year, b.region ? b.region.toUpperCase() : null].filter(Boolean).join(" · ")),
             b.in_abs ? h("div", { style: { marginTop: "4px" } }, absPill(b.in_abs)) : null),
           h("button", { class: "btn small primary", onclick: async (e) => {
             e.target.disabled = true;
             try {
-              await api("/api/import", { method: "POST", body: { root: importRoot, rel: current.rel, asin: b.asin, region: b.region, mode: mode.value, book: b } });
+              await api("/api/import", { method: "POST", body: { root: importRoot, rel: current.rel, asin: b.asin, ref: b.ref, region: b.region, mode: mode.value, book: b } });
               toast(`Importing “${b.title}” — see Queue`, "ok");
               refreshBadge();
               setTimeout(loadFolders, 1500);
@@ -634,7 +638,7 @@ async function renderSettings(view) {
 
   const groups = {};
   for (const s of schema) (groups[s.group] ||= []).push(s);
-  const tests = { slskd: "slskd", Metadata: "audible", Audiobookshelf: "abs" };
+  const tests = { slskd: "slskd", Metadata: "metadata", Audiobookshelf: "abs" };
 
   for (const [group, items] of Object.entries(groups)) {
     const result = h("span", { class: "test-result" });

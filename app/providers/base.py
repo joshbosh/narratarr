@@ -14,6 +14,7 @@ from typing import Any, Protocol
 def empty_book() -> dict[str, Any]:
     return {
         "asin": None,
+        "ref": None,           # stable id for the queue: the ASIN, or "<source>:<id>" when there's no ASIN
         "region": None,
         "provider": None,
         "title": "",
@@ -62,7 +63,7 @@ def html_to_text(value: str | None) -> str | None:
     return s.strip() or None
 
 
-# Audible appends roles to contributor names: "Lawrence Krauss - editor", "Jane Doe - translator",
+# Audible appends roles to contributor names: "Jane Doe - editor", "Jane Doe - translator",
 # occasionally "Jane Doe (Editor)". Roles start lowercase after the dash, which keeps hyphenated
 # names like "Jean-Paul Sartre" or "Smith - Jones" intact.
 _ROLE_DASH = re.compile(r"^(?P<name>.+?)\s+[-\u2013\u2014]\s+(?P<role>[a-z][a-z /&,.'-]*)$")
@@ -71,7 +72,7 @@ _ROLE_PAREN = re.compile(r"^(?P<name>.+?)\s*\((?P<role>editor|editors|translator
 
 
 def split_role(name: str | None) -> tuple[str, str | None]:
-    """'Lawrence Krauss - editor' → ('Lawrence Krauss', 'editor')."""
+    """'Jane Doe - editor' → ('Jane Doe', 'editor')."""
     n = (name or "").strip()
     m = _ROLE_DASH.match(n) or _ROLE_PAREN.match(n)
     if m:

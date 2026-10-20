@@ -47,6 +47,7 @@ def start():
         "NARRATARR_GENERAL__POLL_SECONDS": "1",
         "NARRATARR_BUSY_WAIT": "2",
         "NARRATARR_ABS_WATCHER_WAIT": "8",
+        "NARRATARR_HARDCOVER_URL_OVERRIDE": f"http://127.0.0.1:{MOCK_PORT}/hardcover/v1/graphql",
     }
     app = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(APP_PORT), "--log-level", "warning"],
                            cwd=ROOT, env=env, stdout=open(WORK / "app.log", "w", encoding="utf-8"), stderr=subprocess.STDOUT)
@@ -279,6 +280,46 @@ def main():
         t = mutagen.File(str(out / "Essays On Rivers.m4b"))
         assert t["\xa9ART"] == ["Lena Krause, Omar Field"], t.get("\xa9ART")
         ok(f"roles split off (editor, foreword); queries {[a['query'] for a in j['attempts']]}; tags and folder clean")
+
+        # 6c — Hardcover: off by default; when on, fills gaps, adds books, and is the fallback
+        print("Scenario 6c: Hardcover as a second metadata source")
+        r = c.get("/api/search", params={"q": "gap book"}).json()
+        gap = r["results"][0]
+        assert r["sources"] == 1 and gap["narrators"] == [] and gap["sources"] == ["audible"], (r["sources"], gap)
+        ok("off by default: one source, Audible-only result")
+        c.put("/api/settings", json={"metadata.hardcover_enabled": True, "metadata.hardcover_token": "Bearer hctoken"}).raise_for_status()
+        t = c.post("/api/settings/test/metadata").json()
+        assert t["ok"] and "Hardcover: OK" in t["message"], t
+        r = c.get("/api/search", params={"q": "gap book"}).json()
+        gap = r["results"][0]
+        assert r["sources"] == 2 and gap["title"] == "Gap Book" and gap["sources"] == ["audible", "hardcover"], gap
+        assert gap["narrators"] == ["Hal Cover"] and gap["series"][0]["name"] == "Gap Saga" and gap["series"][0]["sequence"] == "2", gap
+        assert gap["description"] == "Description from Hardcover." and set(gap["filled_from"]) >= {"narrators", "series", "description"}
+        ok("Audible result kept its own title; narrator, series and description filled from Hardcover")
+        tiny = {x["asin"]: x for x in c.get("/api/search", params={"q": "tiny test"}).json()["results"]}
+        assert tiny["B0TINY0001"]["title"] == "The Tiny Test: A Novel" and tiny["B0TINY0001"]["sources"] == ["audible", "hardcover"]
+        assert tiny["B0TINY0001"]["narrators"] == ["Ray Reader"] and tiny["B0TINY0001"]["genres"][0] != "Fantasy"
+        ok("matched by ASIN; Audible values win where both have data")
+        indie = c.get("/api/search", params={"q": "indie tale"}).json()["results"]
+        assert len(indie) == 1 and indie[0]["ref"] == "hardcover:103" and not indie[0]["asin"], indie
+        jr = c.post("/api/jobs", json={"ref": indie[0]["ref"], "book": indie[0]})
+        assert jr.status_code == 200, jr.text
+        assert c.post("/api/jobs", json={"ref": "hardcover:103"}).status_code == 409, "duplicate by reference rejected"
+        j = wait_status(c, jr.json()["id"], {"completed", "failed", "needs_review"}, 90)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        assert Path(j["output_path"]).parts[-2:] == ("Ivy Indie", "Indie Tale"), j["output_path"]
+        st = c.post("/api/search/status", json={"items": [{"ref": "hardcover:103", "title": "Indie Tale", "authors": []}]}).json()
+        assert st["hardcover:103"]["job"], st
+        ok("book only on Hardcover (no ASIN) found, requested by reference, downloaded and filed")
+        httpx.post(f"http://127.0.0.1:{MOCK_PORT}/mock/config", json={"audible_down": True})
+        r = c.get("/api/search", params={"q": "tiny test"}).json()
+        assert r["fallback"] and r["sources"] == 1 and r["results"][0]["title"] == "The Tiny Test", r
+        got = c.post("/api/jobs", json={"asin": "B0GAP00001"})
+        assert got.status_code == 200 and got.json()["narrators"] == ["Hal Cover"], got.text
+        c.post(f"/api/jobs/{got.json()['id']}/cancel"); c.delete(f"/api/jobs/{got.json()['id']}")
+        ok("primary source down → search and ASIN lookups fall back to Hardcover")
+        httpx.post(f"http://127.0.0.1:{MOCK_PORT}/mock/config", json={"audible_down": False})
+        c.put("/api/settings", json={"metadata.hardcover_enabled": False}).raise_for_status()
 
         # 7 — Audiobookshelf
         print("Scenario 7: Audiobookshelf integration")
