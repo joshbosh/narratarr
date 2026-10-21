@@ -539,6 +539,18 @@ def abs_chapters(request: Request, iid: str, body: dict = Body(...)):
     return {"success": True, "updated": True}
 
 
+@app.post("/abs/api/items/{iid}/scan")
+def abs_scan_item(request: Request, iid: str):
+    abs_auth(request)
+    it = ABS["items"][iid]
+    d = _abs_local(it["path"])
+    audio = sorted(p for p in d.rglob("*") if p.suffix.lower() in (".mp3", ".m4b", ".m4a", ".flac"))
+    it["audio"] = [p.name for p in audio]
+    it["size"] = sum(p.stat().st_size for p in audio)
+    ABS["scanned"] = ABS.get("scanned", []) + [iid]
+    return {"result": "UPDATED"}
+
+
 @app.get("/abs/api/items/{iid}/cover")
 def abs_cover(request: Request, iid: str):
     abs_auth(request)

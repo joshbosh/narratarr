@@ -30,6 +30,10 @@ EXTRA_KEEP = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".cue", ".epub", ".nfo"}
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+def _mb(n: int) -> str:
+    return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB" if n >= 1e7 else f"{n / 1e6:.1f} MB"
+
+
 def safe_segment(s: str, limit: int = 120) -> str:
     s = re.sub(r"\s*:\s*", " - ", s)
     s = _ILLEGAL.sub("", s).replace("’", "'").strip().rstrip(".")
@@ -199,9 +203,10 @@ async def process_book(src: Path, book: dict, settings, *, copy: bool = False, s
     moved = sorted(moved, key=lambda p: natural_key(str(p.relative_to(dest))))
 
     if settings.get("processing.reencode"):
-        from .reencode import current_kbps, reencode, should_reencode
+        from .reencode import current_kbps, effective_kbps, reencode, should_reencode
         kbps = int(settings.get("processing.reencode_kbps") or 64)
         if should_reencode(moved, kbps):
+            kbps = effective_kbps(moved, kbps)
             before = sum(p.stat().st_size for p in moved)
             was = current_kbps(moved)
             log_fn(f"Re-encoding {len(moved)} file(s) ({was or 0:.0f} kbps) to one M4B at {kbps} kbps")
@@ -210,7 +215,7 @@ async def process_book(src: Path, book: dict, settings, *, copy: bool = False, s
                 new = await asyncio.to_thread(reencode, moved, dest, safe_segment(book.get("title") or "Audiobook"),
                                               book, kbps, progress_fn)
                 moved = [new]
-                log_fn(f"Re-encoded: {before / 1e6:.0f} MB → {new.stat().st_size / 1e6:.0f} MB")
+                log_fn(f"Re-encoded: {_mb(before)} → {_mb(new.stat().st_size)}")
             except Exception as e:  # noqa: BLE001
                 log_fn(f"Re-encode failed, keeping the original files: {e}")
         else:

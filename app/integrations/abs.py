@@ -101,6 +101,11 @@ class AbsClient:
                 r = await c.post("/api/watcher/update", json={"libraryId": library_id, "path": p, "type": "add"})
                 self._check(r)
 
+    async def scan_item(self, item_id: str) -> None:
+        async with self._c() as c:
+            r = await c.post(f"/api/items/{item_id}/scan")
+            self._check(r)
+
     async def scan_library(self, library_id: str) -> None:
         async with self._c() as c:
             r = await c.post(f"/api/libraries/{library_id}/scan")
@@ -244,6 +249,37 @@ class AbsSync:
     def link(self, item_id: str) -> str:
         base = (self.settings.get("abs.public_url") or self.settings.get("abs.url")).rstrip("/")
         return f"{base}/item/{item_id}"
+
+    async def local_path_for(self, abs_path: str) -> Path:
+        """Map an Audiobookshelf item path to where that folder is mounted in Narratarr."""
+        folder, local = await self.target_folder()
+        base = folder["path"].rstrip("/")
+        if not (abs_path == base or abs_path.startswith(base + "/")):
+            raise AbsError(f"{abs_path} isn't in the Audiobookshelf folder Narratarr can reach ({base})")
+        return local / abs_path[len(base):].lstrip("/")
+
+    async def book_for_item(self, item_id: str) -> tuple[dict, dict]:
+        """(Narratarr book dict built from the ABS item's metadata and chapters, raw item)."""
+        item = await self.client().item(item_id)
+        media = item.get("media") or {}
+        m = media.get("metadata") or {}
+        chapters = [{"title": c.get("title") or f"Chapter {i + 1}", "start_ms": int(float(c.get("start") or 0) * 1000),
+                     "length_ms": int((float(c.get("end") or 0) - float(c.get("start") or 0)) * 1000)}
+                    for i, c in enumerate(media.get("chapters") or [])]
+        book = {
+            "asin": m.get("asin") or None, "ref": m.get("asin") or f"abs:{item_id}", "provider": "audiobookshelf",
+            "title": m.get("title") or "Unknown", "subtitle": m.get("subtitle"),
+            "authors": [{"name": a.get("name"), "role": None, "asin": None} for a in m.get("authors") or [] if a.get("name")],
+            "narrators": list(m.get("narrators") or []),
+            "series": [{"name": x.get("name"), "sequence": x.get("sequence") or None, "asin": None}
+                       for x in m.get("series") or [] if x.get("name")],
+            "genres": list(m.get("genres") or []), "year": m.get("publishedYear"),
+            "release_date": m.get("publishedDate"), "publisher": m.get("publisher"),
+            "description": m.get("descriptionPlain") or m.get("description"), "isbn": m.get("isbn"),
+            "language": m.get("language"), "chapters": chapters or None,
+            "runtime_ms": int(float(media.get("duration") or 0) * 1000) or None,
+        }
+        return book, item
 
     async def target_folder(self) -> tuple[dict, Path]:
         """(ABS folder {id, path}, local path inside Narratarr)."""

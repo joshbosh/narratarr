@@ -83,6 +83,21 @@ function confirmDialog(title, message, okLabel = "Continue") {
       () => finish(false));
   });
 }
+async function reencodeFlow(url, { title, size, duration, files }) {
+  let kbps = 64;
+  try { kbps = (await api("/api/system/status")).reencode_kbps || 64; } catch { /* default */ }
+  const est = duration ? duration * kbps * 1000 / 8 : null;
+  const now = size ? ` (now ${fmtSize(size)})` : "";
+  const msg = `${files && files > 1 ? `Join ${files} files into one M4B` : "Re-encode to M4B"} at ${kbps} kbps, with chapters?` +
+    (est ? ` About ${fmtSize(est)}${now}.` : "") + " This replaces the original audio files.";
+  if (!(await confirmDialog(`Re-encode “${title}”`, msg, "Re-encode"))) return false;
+  try {
+    await api(url, { method: "POST" });
+    toast("Re-encoding — progress is in the sidebar and the Queue", "ok");
+    refreshActivity();
+    return true;
+  } catch (err) { toast(err.message, "bad"); return false; }
+}
 function absPill(ref) {
   if (!ref) return null;
   return h("a", { class: "pill abs", href: ref.link, target: "_blank", rel: "noopener", title: "Open in Audiobookshelf" }, "✓ In Audiobookshelf library");
@@ -301,7 +316,7 @@ function renderQueue(view) {
     return h("div", { class: "job" },
       cover(j.cover_url, j.title),
       h("div", {},
-        h("div", { class: "row" }, status(j.status), j.kind === "import" ? h("span", { class: "pill" }, "Manual import") : null, h("span", { class: "faint", style: { fontSize: "12px" } }, ago(j.created_at))),
+        h("div", { class: "row" }, status(j.status), j.kind === "import" ? h("span", { class: "pill" }, "Manual import") : j.kind === "reencode" ? h("span", { class: "pill" }, "Re-encode") : null, h("span", { class: "faint", style: { fontSize: "12px" } }, ago(j.created_at))),
         h("div", { class: "title", style: { marginTop: "4px" } }, j.title),
         h("div", { class: "muted", style: { fontSize: "13px" } }, names(j.authors), j.narrators?.length ? ` · read by ${names(j.narrators)}` : "", j.series?.length ? ` · ${seriesLabel(j.series[0])}` : ""),
         h("div", { class: "detail" }, j.error && j.status === "failed" ? j.error : j.detail),
@@ -514,6 +529,9 @@ async function openBook(id, onChange) {
       h("h3", {}, "Files"), h("div", { class: "log" }, (b.files || []).map((f) => h("div", {}, f))),
       h("div", { class: "row", style: { marginTop: "18px" } },
         send, absLink,
+        h("button", { class: "btn", onclick: async () => {
+          if (await reencodeFlow(`/api/library/${id}/reencode`, { title: b.title, size: b.size_bytes, duration: b.duration_s, files: b.file_count })) closeModal();
+        } }, "Re-encode to M4B"),
         h("span", { class: "grow" }),
         h("button", { class: "btn ghost", onclick: () => del(false) }, "Remove from list"),
         h("button", { class: "btn ghost danger", onclick: () => del(true) }, "Delete files")))));
@@ -544,7 +562,10 @@ async function openAbsBook(itemId) {
       b.description ? h("p", { class: "muted", style: { whiteSpace: "pre-line", maxWidth: "80ch" } }, b.description) : null,
       h("h3", {}, "Folder in Audiobookshelf"), h("div", { class: "path" }, b.path || "—"),
       h("div", { class: "row", style: { marginTop: "18px" } },
-        h("a", { class: "btn primary", href: b.link, target: "_blank", rel: "noopener" }, "Open in Audiobookshelf")))));
+        h("a", { class: "btn primary", href: b.link, target: "_blank", rel: "noopener" }, "Open in Audiobookshelf"),
+        h("button", { class: "btn", onclick: async () => {
+          if (await reencodeFlow(`/api/abs/items/${itemId}/reencode`, { title: b.title, size: b.size_bytes, duration: b.duration_s, files: b.num_tracks })) closeModal();
+        } }, "Re-encode to M4B")))));
 }
 
 // ============================================================ MANUAL IMPORT

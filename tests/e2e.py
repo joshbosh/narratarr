@@ -487,6 +487,33 @@ def main():
         ok("folder watcher off → fell back to a library scan and still matched the item")
         assert c.get(f"/api/abs/items/li_exist/cover").status_code == 200
         ok("Audiobookshelf covers proxied")
+
+        # 8 — on-demand re-encode of a Narratarr library item and an Audiobookshelf item
+        print("Scenario 8: Re-encode button")
+        lib = c.get("/api/library").json()
+        road = next(b for b in lib["narratarr"] if b["title"] == "Long Road Home")
+        r = c.post(f"/api/library/{road['id']}/reencode"); r.raise_for_status()
+        j = wait_status(c, r.json()["job_id"], {"completed", "failed"}, 120)
+        assert j["status"] == "completed" and "Re-encoded" in j["detail"], (j["detail"], [l["msg"] for l in j["log"]])
+        audio = sorted(p.name for p in Path(road["path"]).rglob("*") if p.suffix in (".mp3", ".m4b"))
+        assert audio == ["Long Road Home.m4b"], audio
+        assert c.get(f"/api/library/{road['id']}").json()["file_count"] == 1
+        assert any("at 32 kbps" in l["msg"] for l in j["log"]), "lean (32 kbps) source isn't re-encoded at a higher bitrate"
+        ok(f"Narratarr library item: 4 MP3s → {audio[0]} ({j['detail']})")
+        abs_id = c.get(f"/api/jobs/{rj}").json()["abs_item_id"]
+        r = c.post(f"/api/abs/items/{abs_id}/reencode"); r.raise_for_status()
+        j = wait_status(c, r.json()["job_id"], {"completed", "failed"}, 120)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        abs_dir = abs_local / "Sam Writer/Road Series/Book 2 - Long Road Home"
+        audio = sorted(p.name for p in abs_dir.rglob("*") if p.suffix in (".mp3", ".m4b"))
+        assert audio == ["Long Road Home.m4b"], audio
+        mock_abs = httpx.get(f"http://127.0.0.1:{MOCK_PORT}/mock/abs/items").json()[abs_id]
+        assert mock_abs["audio"] == ["Long Road Home.m4b"], mock_abs["audio"]
+        t = mutagen.File(str(abs_dir / "Long Road Home.m4b"))
+        assert t["\xa9alb"] == ["Long Road Home"] and t["\xa9wrt"] == ["Kim Narrator"], dict(t.tags or {}).keys()
+        ok("Audiobookshelf item re-encoded in place, tagged from its Audiobookshelf metadata, item rescanned")
+        assert c.post("/api/abs/items/li_exist/reencode").status_code == 409
+        ok("single file already at a low bitrate: refused with 'nothing to gain'")
     except AssertionError as e:
         failures += 1
         print("FAIL:", e)

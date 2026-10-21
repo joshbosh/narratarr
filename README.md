@@ -47,7 +47,8 @@
   asked to scan just that folder, the new item is matched by path, and missing metadata is filled in. Anything that
   can't finish (Audiobookshelf down, folder not mounted) waits as *pending* and retries.
 - **Optional re-encode** (off by default): join a book's files into one M4B with chapters at a lean bitrate (64 kbps
-  by default) using the bundled FFmpeg. It only runs when it helps, and replaces the original files.
+  by default, never above the source's own bitrate) using the bundled FFmpeg. It only runs when it helps, and replaces
+  the original files. Books already in your library, including Audiobookshelf items, have a **Re-encode to M4B** button.
 - **Manual Import:** point it at any folder of audio, match it to an Audible release, and it gets the same treatment.
 
 Narratarr is on-demand only: there's no author or new-release monitoring.

@@ -17,10 +17,34 @@ from .tagging import audio_length, existing_title
 log = logging.getLogger(__name__)
 
 
+def _stream_kbps(p: Path) -> float | None:
+    """The audio stream's own bitrate (ignores embedded cover art and tags)."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                              "stream=bit_rate", "-of", "default=nw=1:nk=1", str(p)],
+                             capture_output=True, text=True, timeout=30).stdout.strip()
+        return int(out) / 1000 if out.isdigit() else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def current_kbps(files: list[Path]) -> float | None:
-    total = sum(audio_length(p) or 0 for p in files)
-    size = sum(p.stat().st_size for p in files)
-    return size * 8 / total / 1000 if total else None
+    lengths = [audio_length(p) or 0 for p in files]
+    total = sum(lengths)
+    if not total:
+        return None
+    rates = [_stream_kbps(p) for p in files]
+    if all(rates):
+        return sum(r * l for r, l in zip(rates, lengths)) / total
+    return sum(p.stat().st_size for p in files) * 8 / total / 1000
+
+
+def effective_kbps(files: list[Path], target_kbps: int) -> int:
+    """Never encode above the source's own bitrate, so joining lean files doesn't make them bigger."""
+    src = current_kbps(files)
+    return max(32, min(target_kbps, round(src))) if src else target_kbps
 
 
 def should_reencode(files: list[Path], target_kbps: int) -> bool:

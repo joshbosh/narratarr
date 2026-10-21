@@ -8,6 +8,7 @@ so a restart picks up where it left off.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -525,8 +526,91 @@ class JobManager:
                 self.log(job_id, "All files downloaded")
 
     # -------------------------------------------------------------- processing
+    def create_reencode(self, book: dict, folder: Path, abs_item_id: str | None = None,
+                        library_id: int | None = None, user_id: str | None = None) -> int:
+        s = _book_summary(book)
+        s["asin"] = book.get("asin") or book.get("ref")
+        now = time.time()
+        book = {**book, "_library_id": library_id}
+        jid = self.db.insert("jobs", {
+            "kind": "reencode", **s, "book": book, "status": "processing", "detail": "Waiting to re-encode",
+            "staging_path": str(folder), "abs_item_id": abs_item_id, "requested_by": user_id,
+            "created_at": now, "updated_at": now,
+        })
+        self.log(jid, f"Re-encode requested for {folder}")
+        return jid
+
+    async def run_reencode(self, job_id: int) -> None:
+        from .postprocess import audio_files, safe_segment
+        from .reencode import current_kbps, effective_kbps, reencode, should_reencode
+        from .tagging import tag_book
+        job = self.get(job_id)
+        folder = Path(job["staging_path"])
+        book = {k: v for k, v in (job["book"] or {}).items() if not k.startswith("_")}
+        kbps = int(self.settings.get("processing.reencode_kbps") or 64)
+        try:
+            if not folder.is_dir():
+                raise FileNotFoundError(f"Folder not found: {folder}")
+            files = audio_files(folder)
+            if not should_reencode(files, kbps):
+                self.update(job_id, status="completed", output_path=str(folder),
+                            detail=f"Nothing to do: already a single file at or below {kbps} kbps")
+                return
+            before = sum(p.stat().st_size for p in files)
+            kbps = effective_kbps(files, kbps)
+            self.log(job_id, f"Re-encoding {len(files)} file(s) ({current_kbps(files) or 0:.0f} kbps) at {kbps} kbps")
+            self.update(job_id, detail="Re-encoding to M4B · 0%")
+            new = await asyncio.to_thread(reencode, files, folder, safe_segment(book.get("title") or "Audiobook"),
+                                          book, kbps, lambda pct: self.update(job_id, detail=f"Re-encoding to M4B · {pct}%"))
+            cover = None
+            for name in ("cover.jpg", "cover.jpeg", "cover.png"):
+                if (folder / name).exists():
+                    cover = (folder / name).read_bytes()
+                    break
+            if self.settings.get("processing.write_tags"):
+                await asyncio.to_thread(tag_book, [new], book,
+                                        cover if self.settings.get("processing.embed_cover") else None, False,
+                                        lambda m: self.log(job_id, m))
+            after = new.stat().st_size
+            from .tagging import audio_length
+            duration = audio_length(new) or 0
+            lib_id = (job["book"] or {}).get("_library_id")
+            if lib_id:
+                self.db.update("library", lib_id, {"file_count": 1, "size_bytes": after, "duration_s": round(duration, 1)})
+            marker = folder / ".narratarr.json"
+            if marker.exists():
+                try:
+                    data = json.loads(marker.read_text(encoding="utf-8"))
+                    data.setdefault("summary", {}).update({"file_count": 1, "size_bytes": after,
+                                                           "duration_s": round(duration, 1)})
+                    marker.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                except (OSError, ValueError):
+                    pass
+            item_id = job.get("abs_item_id")
+            if item_id and self.abs.enabled:
+                try:
+                    await self.abs.client().scan_item(item_id)
+                    self.log(job_id, "Asked Audiobookshelf to rescan the item")
+                except Exception as e:  # noqa: BLE001
+                    self.log(job_id, f"Audiobookshelf rescan failed (it will pick the change up on its next scan): {e}")
+                try:
+                    await self.abs.refresh_index()
+                except Exception:  # noqa: BLE001
+                    pass
+            from .postprocess import _mb
+            msg = f"Re-encoded: {_mb(before)} → {_mb(after)}"
+            self.log(job_id, msg)
+            self.update(job_id, status="completed", output_path=str(folder), progress=100, detail=msg)
+        except Exception as e:  # noqa: BLE001
+            log.exception("re-encode failed for job %s", job_id)
+            self.update(job_id, status="failed", error=str(e), detail="Re-encode failed — original files kept")
+            self.log(job_id, f"Re-encode failed: {e}")
+
     async def run_processing(self, job_id: int) -> None:
         job = self.get(job_id)
+        if job and job["kind"] == "reencode":
+            await self.run_reencode(job_id)
+            return
         src = Path(job["staging_path"] or self.staging_dir(job))
         book = clean_contributors({k: v for k, v in job["book"].items()})
         try:
@@ -747,8 +831,8 @@ class JobManager:
 
     def retry(self, job_id: int) -> None:
         job = self.get(job_id)
-        if job["kind"] == "import":
-            self.update(job_id, status="processing", detail="Retrying import", error=None)
+        if job["kind"] in ("import", "reencode"):
+            self.update(job_id, status="processing", detail="Retrying", error=None)
         elif job.get("staging_path") and Path(job["staging_path"]).exists() and \
                 all(t.get("local") for t in job.get("transfers") or [{}]) and job.get("transfers"):
             self.update(job_id, status="processing", detail="Retrying processing", error=None)
