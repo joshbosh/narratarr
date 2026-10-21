@@ -40,6 +40,7 @@ def _light_job(j: dict) -> dict:
     j["selected"] = sel
     j["files_total"] = len(transfers)
     j["files_done"] = sum(1 for t in transfers if t.get("local"))
+    j["files_missing"] = sum(1 for t in transfers if t.get("missing_local"))
     j.pop("transfers", None)
     return j
 
@@ -179,6 +180,35 @@ async def custom_search(request: Request, job_id: int, payload: dict = Body(...)
     jobs.update(job_id, status="searching", detail=f"Custom search: {query}")
     jobs.start_custom_search(job_id, query)
     return {"ok": True}
+
+
+@router.post("/jobs/{job_id}/redownload-missing")
+async def redownload_missing(request: Request, job_id: int):
+    jobs = _state(request)[2]
+    if not jobs.get(job_id):
+        raise HTTPException(404)
+    try:
+        n = await jobs.redownload_missing(job_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Couldn't queue the missing files: {e}") from e
+    if not n:
+        raise HTTPException(409, "No missing files")
+    return {"requeued": n}
+
+
+@router.post("/jobs/{job_id}/import-partial")
+async def import_partial(request: Request, job_id: int):
+    jobs = _state(request)[2]
+    job = jobs.get(job_id)
+    if not job or not any(t.get("local") for t in job.get("transfers") or []):
+        raise HTTPException(409, "Nothing has been downloaded yet")
+    jobs.import_partial(job_id)
+    return {"ok": True}
+
+
+@router.get("/activity")
+async def activity(request: Request):
+    return _state(request)[2].activity()
 
 
 @router.post("/jobs/{job_id}/retry")
@@ -405,6 +435,16 @@ async def import_scan(request: Request, root: str):
     s = _state(request)[1]
     base = _resolve_import(s, root, ".")
     folders = await asyncio.to_thread(find_book_folders, base, [s.completed])
+    if root == "incomplete":
+        # Narratarr's own staging folders are "<job id> - <title>": suggest the job's author + title instead
+        import re as _re
+        from .matching import primary_author, short_title
+        jobs = _state(request)[2]
+        for f in folders:
+            m = _re.match(r"^(\d+) - ", f["name"])
+            job = jobs.get(int(m.group(1))) if m else None
+            if job and job.get("title"):
+                f["suggestion"] = f"{primary_author(job['book'] or {})} {short_title(job['title'])}".strip()
     return folders
 
 

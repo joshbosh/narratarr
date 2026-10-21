@@ -230,6 +230,7 @@ class AbsSync:
         self.last_sync: float | None = None
         self.last_error: str | None = None
         self.wake = asyncio.Event()
+        self.syncing = False
 
     # -- config helpers
     @property
@@ -268,11 +269,14 @@ class AbsSync:
             return 0
         async with self._lock:
             lib_id = self.settings.get("abs.library_id")
+            self.syncing = True
             try:
                 items = await self.client().library_items(lib_id)
             except Exception as e:  # noqa: BLE001
                 self.last_error = str(e)
                 raise
+            finally:
+                self.syncing = False
             via = {r["item_id"] for r in self.db.query("SELECT item_id FROM abs_links")}
             rows = []
             for it in items:

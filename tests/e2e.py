@@ -360,6 +360,36 @@ def main():
         ok(f"3 MP3s → one M4B with chapters {titles}, tagged, originals removed")
         c.put("/api/settings", json={"processing.reencode": False}).raise_for_status()
 
+        # 6f — a file taken by another app: keep going, then re-download just that file
+        print("Scenario 6f: file moved away by another app")
+        jid = request(c, search(c, "vanish book")[0])
+        seen_activity = False
+        for _ in range(120):
+            j = c.get(f"/api/jobs/{jid}").json()
+            act = c.get("/api/activity").json()
+            seen_activity = seen_activity or any(i["id"] == jid and i["kind"] == "downloading" for i in act["items"])
+            if j["status"] in ("needs_review", "completed", "failed"):
+                break
+            time.sleep(1)
+        assert j["status"] == "needs_review", (j["status"], j["detail"], [l["msg"] for l in j["log"]])
+        lj = next(x for x in c.get("/api/jobs?scope=active").json() if x["id"] == jid)
+        assert lj["files_missing"] == 1 and lj["files_done"] == 2, lj
+        assert any("disappeared" in l["msg"] for l in j["log"])
+        assert seen_activity, "download showed in the activity panel"
+        ok("one file vanished: the other two were kept, job parked with 1 missing file")
+        folders = c.get("/api/import/scan", params={"root": "incomplete"}).json()
+        staged = next(f for f in folders if f["name"].endswith("Vanish Book"))
+        assert staged["suggestion"] == "Val Vanish Vanish Book", staged["suggestion"]
+        ok(f"Manual Import suggests “{staged['suggestion']}” for the staging folder (no job number)")
+        c.post(f"/api/jobs/{jid}/redownload-missing").raise_for_status()
+        j = wait_status(c, jid, {"completed", "failed", "needs_review"}, 90)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        assert len(list(Path(j["output_path"]).glob("*.mp3"))) == 3
+        ok("re-downloaded just the missing file; book completed with all 3 files")
+        recent = c.get("/api/activity").json()["items"]
+        assert any(i["id"] == jid and i["kind"] == "completed" for i in recent), recent
+        ok("activity panel shows the finished book briefly")
+
         # 7 — Audiobookshelf
         print("Scenario 7: Audiobookshelf integration")
         abs_local = WORK / "abs-library"

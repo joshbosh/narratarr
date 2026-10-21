@@ -290,6 +290,10 @@ function renderQueue(view) {
     acts.push(h("button", { class: `btn small ${j.status === "needs_review" ? "primary" : ""}`, onclick: () => openJob(j.id, load) }, j.status === "needs_review" ? "Pick source" : "Details"));
     if (["failed", "cancelled", "needs_review"].includes(j.status)) acts.push(btn("Retry", () => api(`/api/jobs/${j.id}/retry`, { method: "POST" })));
     if (["queued", "searching", "needs_review", "downloading"].includes(j.status)) acts.push(btn("Cancel", () => api(`/api/jobs/${j.id}/cancel`, { method: "POST" }), "small ghost danger"));
+    if (j.files_missing && j.status === "needs_review") {
+      acts.push(btn("Re-download missing", () => api(`/api/jobs/${j.id}/redownload-missing`, { method: "POST" }), "small primary"));
+      acts.push(btn("Import what's here", () => api(`/api/jobs/${j.id}/import-partial`, { method: "POST" })));
+    }
     if (j.status === "completed" && j.abs_status === "pending") acts.push(btn("Send to Audiobookshelf", () => api(`/api/jobs/${j.id}/abs`, { method: "POST" })));
     if (j.abs_link) acts.push(h("a", { class: "btn small", href: j.abs_link, target: "_blank", rel: "noopener" }, "Open in Audiobookshelf"));
     if (["completed", "failed", "cancelled"].includes(j.status)) acts.push(btn("Remove", () => api(`/api/jobs/${j.id}`, { method: "DELETE" }), "small ghost"));
@@ -707,6 +711,42 @@ async function renderSettings(view) {
   }
 }
 
+// ------------------------------------------------------------- activity panel
+const ACT_ICON = { searching: "search", downloading: "down", processing: "gear", abs: "up", sync: "sync",
+  completed: "ok", failed: "bad", needs_review: "warn" };
+function actIcon(kind) {
+  const k = ACT_ICON[kind] || "gear";
+  const paths = {
+    search: '<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>',
+    down: '<path d="M8 2v9M4.5 7.5L8 11l3.5-3.5M3 14h10"/>',
+    up: '<path d="M8 13V4M4.5 7.5L8 4l3.5 3.5M3 2h10"/>',
+    gear: '<circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/>',
+    sync: '<path d="M13 6A5 5 0 0 0 3.5 4.5M3 10a5 5 0 0 0 9.5 1.5"/><path d="M3 2v3h3M13 14v-3h-3"/>',
+    ok: '<path d="M3 8.5l3 3 7-7"/>', bad: '<path d="M4 4l8 8M12 4l-8 8"/>', warn: '<path d="M8 3v6M8 12v.5"/>',
+  };
+  const el = h("span", { class: `act-icon ${k}` });
+  el.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[k]}</svg>`;
+  return el;
+}
+async function refreshActivity() {
+  const box = $("#activity");
+  let data;
+  try { data = await api("/api/activity"); } catch { return; }
+  const items = data.items || [];
+  const rows = items.slice(0, 5).map((it) => h("div", {
+      class: `act-row ${it.kind}`, title: `${it.title} — ${it.text}`,
+      onclick: () => { if (it.id) { if (location.pathname !== "/queue") navigate("/queue"); openJob(it.id); } } },
+    actIcon(it.kind),
+    h("div", { class: "act-body" },
+      h("div", { class: "act-title" }, it.title),
+      h("div", { class: "act-text" }, it.text),
+      it.progress != null && it.progress > 0 && it.progress < 100 ? h("div", { class: "act-bar" }, h("i", { style: { width: `${it.progress}%` } })) : null)));
+  if (data.queued) rows.push(h("div", { class: "act-row queued", onclick: () => navigate("/queue") }, actIcon("gear"),
+    h("div", { class: "act-body" }, h("div", { class: "act-text" }, `${data.queued} waiting in the queue`))));
+  box.replaceChildren(...rows);
+  box.hidden = !rows.length;
+}
+
 // ------------------------------------------------------------- background
 async function refreshBadge() {
   try {
@@ -727,6 +767,7 @@ async function refreshFoot() {
 }
 
 route();
-refreshBadge(); refreshFoot();
+refreshBadge(); refreshFoot(); refreshActivity();
 setInterval(refreshBadge, 5000);
+setInterval(refreshActivity, 2500);
 setInterval(refreshFoot, 30000);

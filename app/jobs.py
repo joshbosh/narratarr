@@ -438,7 +438,7 @@ class JobManager:
                 latest[fn] = r
         failure = None
         for t in transfers:
-            if t.get("local"):
+            if t.get("local") or t.get("missing_local"):
                 continue
             r = latest.get(t["filename"])
             if not r:
@@ -462,11 +462,19 @@ class JobManager:
                     if t["locate_attempts"] == 3:
                         self.log(job_id, f"Finished file not found under slskd downloads path: {t['name']}")
                     if t["locate_attempts"] > 20:
-                        self.update(job_id, transfers=transfers, status="failed",
-                                    error="Downloaded files not found — check the slskd downloads folder setting "
-                                          "and that it's mounted into this container",
-                                    detail="Can't find downloaded files")
-                        return
+                        if not any(x.get("local") or x.get("missing_local") for x in transfers):
+                            # nothing from this book has ever been found: almost certainly a mount problem
+                            self.update(job_id, transfers=transfers, status="failed",
+                                        error="Downloaded files not found — check the slskd downloads folder setting "
+                                              "and that it's mounted into this container",
+                                        detail="Can't find downloaded files")
+                            return
+                        # other files arrived fine, so something else moved this one; carry on with the rest
+                        t["missing_local"] = True
+                        t["state"] = "Missing after download"
+                        self.log(job_id, f"{t['name']} finished in slskd but disappeared before Narratarr could move it. "
+                                         "Another app watching slskd's completed folder (e.g. a music auto-importer) "
+                                         "probably took it. Continuing with the other files.")
             elif transfer_failed(t["state"]):
                 if time.time() < t.get("retry_after", 0):
                     continue
@@ -487,14 +495,15 @@ class JobManager:
                     failure = f"{t['name']}: {t['state']}"
 
         total = sum(t["size"] for t in transfers) or 1
-        done = sum(t["size"] if t.get("local") else t.get("bytes", 0) for t in transfers)
+        done = sum(t["size"] if (t.get("local") or t.get("missing_local")) else t.get("bytes", 0) for t in transfers)
         progress = round(done / total * 100, 1)
         now = time.time()
         if done > selected.get("last_bytes", 0):
             selected["last_bytes"] = done
             selected["last_progress_at"] = now
         n_local = sum(1 for t in transfers if t.get("local"))
-        states = {t["state"] for t in transfers if not t.get("local")}
+        n_missing = sum(1 for t in transfers if t.get("missing_local"))
+        states = {t["state"] for t in transfers if not t.get("local") and not t.get("missing_local")}
         detail = f"{n_local}/{len(transfers)} files · {progress:.0f}%" + (f" · {', '.join(sorted(states))}" if states else "")
         self.update(job_id, transfers=transfers, progress=progress, selected=selected, detail=detail)
 
@@ -505,9 +514,15 @@ class JobManager:
         if now - selected.get("last_progress_at", now) > stall:
             await self._next_candidate(job_id, f"no progress for {self.settings.get('slskd.stall_minutes')} min")
             return
-        if n_local == len(transfers):
-            self.update(job_id, status="processing", detail="Download complete — processing", progress=100)
-            self.log(job_id, "All files downloaded")
+        if n_local + n_missing == len(transfers):
+            if n_missing:
+                self.update(job_id, status="needs_review", progress=100,
+                            detail=f"{n_missing} of {len(transfers)} file(s) went missing after downloading — "
+                                   "another app probably moved them. Re-download them, or import what's here.")
+                self.log(job_id, f"Downloads finished; {n_missing} file(s) missing")
+            else:
+                self.update(job_id, status="processing", detail="Download complete — processing", progress=100)
+                self.log(job_id, "All files downloaded")
 
     # -------------------------------------------------------------- processing
     async def run_processing(self, job_id: int) -> None:
@@ -678,6 +693,57 @@ class JobManager:
         self.update(job_id, status="cancelled", detail="Cancelled", transfers=[])
         self.log(job_id, "Cancelled")
         self.wake.set()                         # let the next queued job start immediately
+
+    async def redownload_missing(self, job_id: int) -> int:
+        job = self.get(job_id)
+        transfers = job.get("transfers") or []
+        missing = [t for t in transfers if t.get("missing_local")]
+        if not missing:
+            return 0
+        client = self.slskd()
+        for t in missing:
+            if t.get("transfer_id"):
+                await client.cancel(t["username"], t["transfer_id"], remove=True)
+            await client.enqueue(t["username"], [t], t["dest"])
+            t.update({"missing_local": False, "state": "Requested", "percent": 0, "bytes": 0, "locate_attempts": 0,
+                      "missing": 0, "transfer_id": None})
+        selected = job.get("selected") or {}
+        selected["last_progress_at"] = time.time()
+        self.update(job_id, status="downloading", transfers=transfers, selected=selected,
+                    detail=f"Re-downloading {len(missing)} missing file(s)", error=None)
+        self.log(job_id, f"Re-downloading {len(missing)} missing file(s)")
+        return len(missing)
+
+    def import_partial(self, job_id: int) -> None:
+        job = self.get(job_id)
+        n = sum(1 for t in job.get("transfers") or [] if t.get("local"))
+        self.update(job_id, status="processing", detail=f"Importing the {n} file(s) that arrived")
+        self.log(job_id, f"Importing {n} file(s) without the missing ones")
+
+    def activity(self) -> dict:
+        """What's happening right now, for the sidebar activity panel."""
+        now = time.time()
+        items = []
+        for j in self.db.query("SELECT id, title, status, detail, progress, abs_status, updated_at FROM jobs "
+                               "WHERE status IN ('searching','downloading','processing') ORDER BY updated_at DESC"):
+            items.append({"id": j["id"], "title": j["title"], "kind": j["status"], "text": j["detail"] or "",
+                          "progress": j["progress"] if j["status"] in ("downloading", "processing") else None})
+        for jid in list(self._abs_inflight):
+            j = self.get(jid)
+            if j:
+                items.append({"id": jid, "title": j["title"], "kind": "abs", "text": j.get("abs_detail") or
+                              "Sending to Audiobookshelf", "progress": None})
+        if self.abs.syncing:
+            items.append({"id": None, "title": "Audiobookshelf", "kind": "sync", "text": "Syncing library", "progress": None})
+        recent = self.db.query("SELECT id, title, status, detail FROM jobs WHERE updated_at > ? "
+                               "AND status IN ('completed','failed','needs_review') ORDER BY updated_at DESC LIMIT 3",
+                               (now - 12,))
+        for j in recent:
+            items.append({"id": j["id"], "title": j["title"], "kind": j["status"],
+                          "text": {"completed": "Completed", "failed": "Failed", "needs_review": "Needs review"}[j["status"]],
+                          "progress": None})
+        queued = self.db.one("SELECT COUNT(*) n FROM jobs WHERE status='queued'")["n"]
+        return {"items": items, "queued": queued}
 
     def retry(self, job_id: int) -> None:
         job = self.get(job_id)

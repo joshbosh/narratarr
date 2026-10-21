@@ -36,7 +36,10 @@
   (folding `CD1`/`Disc 2` sub-folders together), fuzzy-scores them against the Audible record, and downloads the best match.
   Runtime is the strongest signal, which separates abridged editions and different narrations.
 - **Falls back automatically.** A source that errors, times out or stalls is retried, then the next candidate is tried.
-  If slskd itself is busy, Narratarr backs off rather than burning through sources.
+  If slskd itself is busy, Narratarr backs off rather than burning through sources. If another app moves a finished
+  file out of slskd's folder, the rest of the book keeps downloading and you can re-download just that file.
+- **Activity panel:** the bottom of the sidebar shows what's happening right now (searching, downloading,
+  re-encoding, sending to Audiobookshelf), like the *arr apps.
 - **Tags without renaming.** Filenames are kept as downloaded. Files get full tags (title, author, narrator, series and
   part, ASIN, description, genres, year, track and disc numbers, embedded cover). Single-file books get Audible's chapter
   list when the file has none and the length matches.
