@@ -203,23 +203,29 @@ async def process_book(src: Path, book: dict, settings, *, copy: bool = False, s
     moved = sorted(moved, key=lambda p: natural_key(str(p.relative_to(dest))))
 
     if settings.get("processing.reencode"):
-        from .reencode import current_kbps, effective_kbps, reencode, should_reencode
+        import asyncio
+        from .reencode import current_kbps, effective_kbps, reencode, reencode_each, should_reencode
         kbps = int(settings.get("processing.reencode_kbps") or 64)
-        if should_reencode(moved, kbps):
-            kbps = effective_kbps(moved, kbps)
+        merge = bool(settings.get("processing.reencode_merge"))
+        if should_reencode(moved, kbps, merge):
             before = sum(p.stat().st_size for p in moved)
             was = current_kbps(moved)
-            log_fn(f"Re-encoding {len(moved)} file(s) ({was or 0:.0f} kbps) to one M4B at {kbps} kbps")
             try:
-                import asyncio
-                new = await asyncio.to_thread(reencode, moved, dest, safe_segment(book.get("title") or "Audiobook"),
-                                              book, kbps, progress_fn)
-                moved = [new]
-                log_fn(f"Re-encoded: {_mb(before)} → {_mb(new.stat().st_size)}")
+                if merge:
+                    kbps = effective_kbps(moved, kbps)
+                    log_fn(f"Re-encoding {len(moved)} file(s) ({was or 0:.0f} kbps) to one M4B at {kbps} kbps")
+                    moved = [await asyncio.to_thread(reencode, moved, dest,
+                                                     safe_segment(book.get("title") or "Audiobook"),
+                                                     book, kbps, progress_fn)]
+                else:
+                    log_fn(f"Re-encoding {len(moved)} file(s) ({was or 0:.0f} kbps) one by one at up to {kbps} kbps")
+                    moved = await asyncio.to_thread(reencode_each, moved, kbps, progress_fn)
+                log_fn(f"Re-encoded: {_mb(before)} → {_mb(sum(p.stat().st_size for p in moved))}")
             except Exception as e:  # noqa: BLE001
+                moved = audio_files(dest)
                 log_fn(f"Re-encode failed, keeping the original files: {e}")
         else:
-            log_fn("Re-encode skipped: already a single file at or below the target bitrate")
+            log_fn("Re-encode skipped: already at or below the target bitrate")
 
     cover = None
     if settings.get("processing.save_cover") or settings.get("processing.embed_cover"):

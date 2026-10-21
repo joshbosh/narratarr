@@ -63,6 +63,7 @@ async def system_status(request: Request):
     lib = db.one("SELECT COUNT(*) n FROM library")["n"]
     return {"version": __version__, "paths": paths, "ffmpeg": bool(shutil.which("ffmpeg")),
             "reencode_kbps": int(s.get("processing.reencode_kbps") or 64),
+            "reencode_merge": bool(s.get("processing.reencode_merge")),
             "jobs": counts, "library": lib, "auth": s.get("auth.mode")}
 
 
@@ -325,7 +326,16 @@ async def library_send_to_abs(request: Request, item_id: int):
     return {"job_id": jid}
 
 
-def _reencode_check(s, files: list, size: int | None, duration: float | None) -> None:
+async def _reencode_merge(request: Request, s) -> bool:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001  (no body)
+        body = {}
+    merge = body.get("merge") if isinstance(body, dict) else None
+    return bool(s.get("processing.reencode_merge")) if merge is None else bool(merge)
+
+
+def _reencode_check(s, files: list, merge: bool) -> None:
     from .reencode import should_reencode
     import shutil as _sh
     if not _sh.which("ffmpeg"):
@@ -333,8 +343,9 @@ def _reencode_check(s, files: list, size: int | None, duration: float | None) ->
     kbps = int(s.get("processing.reencode_kbps") or 64)
     if not files:
         raise HTTPException(404, "No audio files found in the book's folder")
-    if not should_reencode(files, kbps):
-        raise HTTPException(409, f"Already a single file at or below {kbps} kbps — nothing to gain")
+    if not should_reencode(files, kbps, merge):
+        what = "a single file" if merge else "every file is"
+        raise HTTPException(409, f"Already {what} at or below {kbps} kbps — nothing to gain")
 
 
 @router.post("/library/{item_id}/reencode")
@@ -348,9 +359,10 @@ async def library_reencode(request: Request, item_id: int, user: User = Depends(
     if not folder.is_dir():
         raise HTTPException(404, f"Folder not found: {folder}")
     files = await asyncio.to_thread(audio_files, folder)
-    _reencode_check(s, files, row.get("size_bytes"), row.get("duration_s"))
+    merge = await _reencode_merge(request, s)
+    await asyncio.to_thread(_reencode_check, s, files, merge)
     book = row["book"] or {}
-    jid = jobs.create_reencode(book, folder, abs_item_id=None, library_id=item_id, user_id=user.id)
+    jid = jobs.create_reencode(book, folder, abs_item_id=None, library_id=item_id, user_id=user.id, merge=merge)
     return {"job_id": jid}
 
 
@@ -370,8 +382,9 @@ async def abs_item_reencode(request: Request, item_id: str, user: User = Depends
     if not folder.is_dir():
         raise HTTPException(404, f"Narratarr can't see {folder} — is the Audiobookshelf folder mounted?")
     files = await asyncio.to_thread(audio_files, folder)
-    _reencode_check(s, files, None, None)
-    jid = jobs.create_reencode(book, folder, abs_item_id=item_id, user_id=user.id)
+    merge = await _reencode_merge(request, s)
+    await asyncio.to_thread(_reencode_check, s, files, merge)
+    jid = jobs.create_reencode(book, folder, abs_item_id=item_id, user_id=user.id, merge=merge)
     return {"job_id": jid}
 
 

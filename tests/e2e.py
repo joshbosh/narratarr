@@ -512,6 +512,34 @@ def main():
         t = mutagen.File(str(abs_dir / "Long Road Home.m4b"))
         assert t["\xa9alb"] == ["Long Road Home"] and t["\xa9wrt"] == ["Kim Narrator"], dict(t.tags or {}).keys()
         ok("Audiobookshelf item re-encoded in place, tagged from its Audiobookshelf metadata, item rescanned")
+        # file by file: names and folders kept, lean files left alone, FLAC → .m4a
+        lib = c.get("/api/library").json()
+        other = next(b for b in lib["narratarr"] if b["title"] != "Long Road Home" and Path(b["path"]).is_dir())
+        folder = Path(other["path"])
+        for p in folder.rglob("*"):
+            if p.is_file() and p.suffix.lower() in (".mp3", ".m4b", ".m4a", ".flac"):
+                p.unlink()
+        (folder / "CD2").mkdir(exist_ok=True)
+        def tone(path, *codec):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=400:duration=20",
+                            *codec, str(path)], check=True)
+        tone(folder / "00 Intro.mp3", "-c:a", "libmp3lame", "-b:a", "32k")
+        tone(folder / "01 Part.mp3", "-c:a", "libmp3lame", "-b:a", "192k")
+        tone(folder / "02 Part.mp3", "-c:a", "libmp3lame", "-b:a", "192k")
+        tone(folder / "CD2" / "03 Part.flac", "-c:a", "flac")
+        r = c.post(f"/api/library/{other['id']}/reencode", json={"merge": False}); r.raise_for_status()
+        j = wait_status(c, r.json()["job_id"], {"completed", "failed"}, 120)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        audio = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*")
+                       if p.suffix in (".mp3", ".m4a", ".flac", ".m4b"))
+        assert audio == ["00 Intro.mp3", "01 Part.mp3", "02 Part.mp3", "CD2/03 Part.m4a"], audio
+        assert round(mutagen.File(str(folder / "00 Intro.mp3")).info.bitrate / 1000) == 32, "lean file was re-encoded"
+        rate = mutagen.File(str(folder / "01 Part.mp3")).info.bitrate / 1000
+        assert 56 <= rate <= 72, rate
+        assert c.get(f"/api/library/{other['id']}").json()["file_count"] == 4
+        assert not list(folder.rglob(".narratarr-tmp-*"))
+        ok(f"file by file: {audio} kept their names, lean intro untouched, 192 kbps → {rate:.0f} kbps ({j['detail']})")
+        assert c.post(f"/api/library/{other['id']}/reencode", json={"merge": False}).status_code == 409
         assert c.post("/api/abs/items/li_exist/reencode").status_code == 409
         ok("single file already at a low bitrate: refused with 'nothing to gain'")
     except AssertionError as e:

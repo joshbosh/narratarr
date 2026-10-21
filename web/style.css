@@ -249,3 +249,5 @@ a.pill.abs:hover { background: color-mix(in srgb, var(--abs) 12%, transparent); 
   .activity { order: 3; width: 100%; margin-top: 0; padding-top: 6px; }
   .activity .act-row:not(:first-child) { display: none; }
 }
+
+input[type="checkbox"] { accent-color: var(--accent); }

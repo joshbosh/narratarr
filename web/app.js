@@ -84,15 +84,36 @@ function confirmDialog(title, message, okLabel = "Continue") {
   });
 }
 async function reencodeFlow(url, { title, size, duration, files }) {
-  let kbps = 64;
-  try { kbps = (await api("/api/system/status")).reencode_kbps || 64; } catch { /* default */ }
+  let kbps = 64, merge = true;
+  try { const st = await api("/api/system/status"); kbps = st.reencode_kbps || 64; merge = st.reencode_merge !== false; } catch { /* defaults */ }
+  const many = files && files > 1;
   const est = duration ? duration * kbps * 1000 / 8 : null;
-  const now = size ? ` (now ${fmtSize(size)})` : "";
-  const msg = `${files && files > 1 ? `Join ${files} files into one M4B` : "Re-encode to M4B"} at ${kbps} kbps, with chapters?` +
-    (est ? ` About ${fmtSize(est)}${now}.` : "") + " This replaces the original audio files.";
-  if (!(await confirmDialog(`Re-encode “${title}”`, msg, "Re-encode"))) return false;
+  const sizeLine = est ? ` At most about ${fmtSize(est)}${size ? ` (now ${fmtSize(size)})` : ""}.` : "";
+  const msg = h("p", { class: "muted", style: { marginTop: "10px" } });
+  const box = h("input", { type: "checkbox" });
+  box.checked = merge;
+  const describe = () => msg.replaceChildren(box.checked
+    ? `${many ? `Joins the ${files} files into one M4B` : "Converts it to M4B"} at ${kbps} kbps, with chapters.${sizeLine} The original files are replaced, so their names aren't kept.`
+    : `Re-encodes ${many ? "each file that's above" : "the file if it's above"} ${kbps} kbps on its own, keeping names and folders (MP3 stays MP3; other formats become AAC .m4a).${sizeLine} The originals are replaced.`);
+  box.addEventListener("change", describe);
+  describe();
+  const ok = await new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; closeModal(); resolve(v); };
+    openModal(h("div", { class: "modal small" },
+      h("header", {}, h("div", {}, h("h2", { style: { margin: 0 } }, `Re-encode “${title}”`))),
+      h("div", { class: "body" },
+        h("label", { class: "row", style: { gap: "8px", marginTop: "10px", cursor: "pointer" } }, box,
+          many ? "Join into one M4B with chapters" : "Convert to M4B"),
+        msg,
+        h("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "18px" } },
+          h("button", { class: "btn ghost", onclick: () => finish(false) }, "Cancel"),
+          h("button", { class: "btn primary", onclick: () => finish(true) }, "Re-encode")))),
+      () => finish(false));
+  });
+  if (!ok) return false;
   try {
-    await api(url, { method: "POST" });
+    await api(url, { method: "POST", body: { merge: box.checked } });
     toast("Re-encoding — progress is in the sidebar and the Queue", "ok");
     refreshActivity();
     return true;
@@ -531,7 +552,7 @@ async function openBook(id, onChange) {
         send, absLink,
         h("button", { class: "btn", onclick: async () => {
           if (await reencodeFlow(`/api/library/${id}/reencode`, { title: b.title, size: b.size_bytes, duration: b.duration_s, files: b.file_count })) closeModal();
-        } }, "Re-encode to M4B"),
+        } }, "Re-encode"),
         h("span", { class: "grow" }),
         h("button", { class: "btn ghost", onclick: () => del(false) }, "Remove from list"),
         h("button", { class: "btn ghost danger", onclick: () => del(true) }, "Delete files")))));
@@ -565,7 +586,7 @@ async function openAbsBook(itemId) {
         h("a", { class: "btn primary", href: b.link, target: "_blank", rel: "noopener" }, "Open in Audiobookshelf"),
         h("button", { class: "btn", onclick: async () => {
           if (await reencodeFlow(`/api/abs/items/${itemId}/reencode`, { title: b.title, size: b.size_bytes, duration: b.duration_s, files: b.num_tracks })) closeModal();
-        } }, "Re-encode to M4B")))));
+        } }, "Re-encode")))));
 }
 
 // ============================================================ MANUAL IMPORT
