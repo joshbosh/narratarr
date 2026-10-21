@@ -84,18 +84,27 @@ function confirmDialog(title, message, okLabel = "Continue") {
   });
 }
 async function reencodeFlow(url, { title, size, duration, files }) {
-  let kbps = 64, merge = true;
-  try { const st = await api("/api/system/status"); kbps = st.reencode_kbps || 64; merge = st.reencode_merge !== false; } catch { /* defaults */ }
+  let kbps = 64, merge = true, choices = { 64: "64 kbps", 96: "96 kbps", 128: "128 kbps" };
+  try {
+    const st = await api("/api/system/status");
+    kbps = st.reencode_kbps || 64; merge = st.reencode_merge !== false; choices = st.reencode_choices || choices;
+  } catch { /* defaults */ }
+  if (!choices[kbps]) choices = { ...choices, [kbps]: `${kbps} kbps` };
   const many = files && files > 1;
-  const est = duration ? duration * kbps * 1000 / 8 : null;
-  const sizeLine = est ? ` At most about ${fmtSize(est)}${size ? ` (now ${fmtSize(size)})` : ""}.` : "";
+  const rate = h("select", { style: { width: "100%" } }, Object.entries(choices).map(([k, label]) => h("option", { value: k, selected: Number(k) === kbps }, label)));
   const msg = h("p", { class: "muted", style: { marginTop: "10px" } });
   const box = h("input", { type: "checkbox" });
   box.checked = merge;
-  const describe = () => msg.replaceChildren(box.checked
+  const describe = () => {
+    kbps = Number(rate.value);
+    const est = duration ? duration * kbps * 1000 / 8 : null;
+    const sizeLine = est ? ` At most about ${fmtSize(est)}${size ? ` (now ${fmtSize(size)})` : ""}.` : "";
+    msg.replaceChildren(box.checked
     ? `${many ? `Joins the ${files} files into one M4B` : "Converts it to M4B"} at ${kbps} kbps, with chapters.${sizeLine} The original files are replaced, so their names aren't kept.`
     : `Re-encodes ${many ? "each file that's above" : "the file if it's above"} ${kbps} kbps on its own, keeping names and folders (MP3 stays MP3; other formats become AAC .m4a).${sizeLine} The originals are replaced.`);
+  };
   box.addEventListener("change", describe);
+  rate.addEventListener("change", describe);
   describe();
   const ok = await new Promise((resolve) => {
     let done = false;
@@ -105,6 +114,8 @@ async function reencodeFlow(url, { title, size, duration, files }) {
       h("div", { class: "body" },
         h("label", { class: "row", style: { gap: "8px", marginTop: "10px", cursor: "pointer" } }, box,
           many ? "Join into one M4B with chapters" : "Convert to M4B"),
+        h("label", { style: { display: "block", marginTop: "12px" } },
+          h("div", { class: "faint", style: { fontSize: "12px", marginBottom: "4px" } }, "Bitrate"), rate),
         msg,
         h("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "18px" } },
           h("button", { class: "btn ghost", onclick: () => finish(false) }, "Cancel"),
@@ -113,7 +124,7 @@ async function reencodeFlow(url, { title, size, duration, files }) {
   });
   if (!ok) return false;
   try {
-    await api(url, { method: "POST", body: { merge: box.checked } });
+    await api(url, { method: "POST", body: { merge: box.checked, kbps: Number(rate.value) } });
     toast("Re-encoding — progress is in the sidebar and the Queue", "ok");
     refreshActivity();
     return true;
@@ -707,7 +718,12 @@ async function renderSettings(view) {
         input = h("input", { type: "checkbox", checked: !!s.value });
         sec.append(h("div", { class: "field" }, h("div", {}, h("label", {}, s.label), s.help ? h("div", { class: "help" }, s.help) : null), h("label", { class: "switch" }, input, h("span"))));
       } else {
-        if (s.type === "select") input = h("select", {}, s.options.map((o) => h("option", { value: o, selected: o === s.value }, o === "" ? "(none)" : o)));
+        if (s.type === "select" || s.options?.length) {
+          const opts = s.options.map(String);
+          if (s.value !== "" && s.value != null && !opts.includes(String(s.value))) opts.push(String(s.value));
+          input = h("select", {}, opts.map((o) => h("option", { value: o, selected: o === String(s.value) },
+            s.labels?.[o] ?? (o === "" ? "(none)" : s.type === "int" ? `${o} (custom)` : o))));
+        }
         else if (s.type === "abs_library" || s.type === "abs_folder") {
           input = h("select", {}, h("option", { value: s.value || "" }, s.value ? `${s.value} (Save & test to load names)` : "Save & test to load"));
           if (s.type === "abs_library") input.addEventListener("change", () => fillFolders());
