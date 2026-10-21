@@ -40,6 +40,7 @@ def _light_job(j: dict) -> dict:
     j["selected"] = sel
     j["files_total"] = len(transfers)
     j["files_done"] = sum(1 for t in transfers if t.get("local"))
+    j["files_missing"] = sum(1 for t in transfers if t.get("missing_local"))
     j.pop("transfers", None)
     return j
 
@@ -61,6 +62,8 @@ async def system_status(request: Request):
     counts = {r["status"]: r["n"] for r in db.query("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
     lib = db.one("SELECT COUNT(*) n FROM library")["n"]
     return {"version": __version__, "paths": paths, "ffmpeg": bool(shutil.which("ffmpeg")),
+            "reencode_kbps": int(s.get("processing.reencode_kbps") or 64),
+            "reencode_merge": bool(s.get("processing.reencode_merge")),
             "jobs": counts, "library": lib, "auth": s.get("auth.mode")}
 
 
@@ -181,6 +184,35 @@ async def custom_search(request: Request, job_id: int, payload: dict = Body(...)
     return {"ok": True}
 
 
+@router.post("/jobs/{job_id}/redownload-missing")
+async def redownload_missing(request: Request, job_id: int):
+    jobs = _state(request)[2]
+    if not jobs.get(job_id):
+        raise HTTPException(404)
+    try:
+        n = await jobs.redownload_missing(job_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Couldn't queue the missing files: {e}") from e
+    if not n:
+        raise HTTPException(409, "No missing files")
+    return {"requeued": n}
+
+
+@router.post("/jobs/{job_id}/import-partial")
+async def import_partial(request: Request, job_id: int):
+    jobs = _state(request)[2]
+    job = jobs.get(job_id)
+    if not job or not any(t.get("local") for t in job.get("transfers") or []):
+        raise HTTPException(409, "Nothing has been downloaded yet")
+    jobs.import_partial(job_id)
+    return {"ok": True}
+
+
+@router.get("/activity")
+async def activity(request: Request):
+    return _state(request)[2].activity()
+
+
 @router.post("/jobs/{job_id}/retry")
 async def retry_job(request: Request, job_id: int):
     jobs = _state(request)[2]
@@ -291,6 +323,68 @@ async def library_send_to_abs(request: Request, item_id: int):
         jid = jobs.queue_abs_for_library_item(item_id)
     except ValueError as e:
         raise HTTPException(404, str(e)) from e
+    return {"job_id": jid}
+
+
+async def _reencode_merge(request: Request, s) -> bool:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001  (no body)
+        body = {}
+    merge = body.get("merge") if isinstance(body, dict) else None
+    return bool(s.get("processing.reencode_merge")) if merge is None else bool(merge)
+
+
+def _reencode_check(s, files: list, merge: bool) -> None:
+    from .reencode import should_reencode
+    import shutil as _sh
+    if not _sh.which("ffmpeg"):
+        raise HTTPException(409, "ffmpeg isn't available in this container")
+    kbps = int(s.get("processing.reencode_kbps") or 64)
+    if not files:
+        raise HTTPException(404, "No audio files found in the book's folder")
+    if not should_reencode(files, kbps, merge):
+        what = "a single file" if merge else "every file is"
+        raise HTTPException(409, f"Already {what} at or below {kbps} kbps — nothing to gain")
+
+
+@router.post("/library/{item_id}/reencode")
+async def library_reencode(request: Request, item_id: int, user: User = Depends(current_user)):
+    from .postprocess import audio_files
+    db, s, jobs = _state(request)
+    row = db.one("SELECT * FROM library WHERE id=?", (item_id,))
+    if not row:
+        raise HTTPException(404)
+    folder = Path(row["path"])
+    if not folder.is_dir():
+        raise HTTPException(404, f"Folder not found: {folder}")
+    files = await asyncio.to_thread(audio_files, folder)
+    merge = await _reencode_merge(request, s)
+    await asyncio.to_thread(_reencode_check, s, files, merge)
+    book = row["book"] or {}
+    jid = jobs.create_reencode(book, folder, abs_item_id=None, library_id=item_id, user_id=user.id, merge=merge)
+    return {"job_id": jid}
+
+
+@router.post("/abs/items/{item_id}/reencode")
+async def abs_item_reencode(request: Request, item_id: str, user: User = Depends(current_user)):
+    from .postprocess import audio_files
+    _, s, jobs = _state(request)
+    if not jobs.abs.enabled:
+        raise HTTPException(400, "Audiobookshelf isn't set up — see Settings")
+    try:
+        book, item = await jobs.abs.book_for_item(item_id)
+        folder = await jobs.abs.local_path_for(item.get("path") or "")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(409, str(e)) from e
+    if not folder.is_dir():
+        raise HTTPException(404, f"Narratarr can't see {folder} — is the Audiobookshelf folder mounted?")
+    files = await asyncio.to_thread(audio_files, folder)
+    merge = await _reencode_merge(request, s)
+    await asyncio.to_thread(_reencode_check, s, files, merge)
+    jid = jobs.create_reencode(book, folder, abs_item_id=item_id, user_id=user.id, merge=merge)
     return {"job_id": jid}
 
 
@@ -405,6 +499,16 @@ async def import_scan(request: Request, root: str):
     s = _state(request)[1]
     base = _resolve_import(s, root, ".")
     folders = await asyncio.to_thread(find_book_folders, base, [s.completed])
+    if root == "incomplete":
+        # Narratarr's own staging folders are "<job id> - <title>": suggest the job's author + title instead
+        import re as _re
+        from .matching import primary_author, short_title
+        jobs = _state(request)[2]
+        for f in folders:
+            m = _re.match(r"^(\d+) - ", f["name"])
+            job = jobs.get(int(m.group(1))) if m else None
+            if job and job.get("title"):
+                f["suggestion"] = f"{primary_author(job['book'] or {})} {short_title(job['title'])}".strip()
     return folders
 
 

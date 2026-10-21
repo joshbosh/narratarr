@@ -89,6 +89,8 @@ CATALOG = {
         product("B0EXIST001", "Existing Story", ["Old Author"], ["Prior Voice"], 1),
         product("B0CLASS001", "Shelf Classic", ["Ada Shelf"], ["Some Reader"], 1),
         {**product("B0GAP00001", "Gap Book", ["Gwen Gap"], [], 1), "publisher_summary": None, "series": []},
+        product("B0CHAP0001", "Chapter Book", ["Cora Chapter"], ["Pat Reader"], 1),
+        product("B0VAN00001", "Vanish Book", ["Val Vanish"], ["Vic Reader"], 1),
         product("B0EDIT0001", "Essays On Rivers", ["Lena Krause - editor", "Omar Field - foreword"],
                 ["Contributing Authors", "Lena Krause"], 1),
     ],
@@ -115,6 +117,10 @@ SHARES = [
     # series dump folder containing several books
     ("dumppeer", "@@dump\\Jane Author\\Everything\\The Tiny Test.m4b", "single.m4b", 60, {}),
     ("dumppeer", "@@dump\\Jane Author\\Everything\\Some Other Book.m4b", "single.m4b", 60, {}),
+    *[("chappeer", f"@@ch\\Audiobooks\\Cora Chapter\\Chapter Book\\0{n} - Chapter Book.mp3", "part.mp3", 15, {})
+      for n in (1, 2, 3)],
+    *[("vanpeer", f"@@va\\Audiobooks\\Val Vanish\\Vanish Book\\0{n} - Vanish Book.mp3", "part.mp3", 15,
+       {"vanish_once": n == 2}) for n in (1, 2, 3)],
     ("indiepeer", "@@in\\Audiobooks\\Ivy Indie\\Indie Tale\\Indie Tale.m4b", "single.m4b", 60, {}),
     ("essaypeer", "@@es\\Audiobooks\\Lena Krause\\Essays On Rivers\\Essays On Rivers.m4b", "single.m4b", 60, {}),
     ("shelfpeer", "@@sh\\Audiobooks\\Abe Shelver\\Shelf Saga 3 - Shelf Bound\\Shelf Bound.m4b", "single.m4b", 60, {}),
@@ -122,6 +128,7 @@ SHARES = [
 
 app = FastAPI()
 SEARCHES: dict[str, dict] = {}
+VANISHED: set[str] = set()   # files an "auto-importer" already took once
 TRANSFERS: dict[str, list[dict]] = {}
 BATCH_DEST: dict[str, str] = {}
 
@@ -253,7 +260,8 @@ def _enqueue(username: str, files: list[dict], dest: str | None):
         share = next(s for s in SHARES if s[1] == f["filename"])
         lst.append({"id": str(uuid.uuid4()), "username": username, "filename": f["filename"], "size": f["size"],
                     "requestedAt": f"{time.time():.6f}", "created": time.time(), "dest": dest, "src": share[2],
-                    "fail": share[4].get("fail", False), "removed": False, "state": "Requested"})
+                    "fail": share[4].get("fail", False), "vanish_once": share[4].get("vanish_once", False),
+                    "removed": False, "state": "Requested"})
 
 
 @app.post("/api/v0/transfers/downloads/batches")
@@ -295,6 +303,9 @@ def _advance(t: dict):
         target = DL / sub / parts[-1]
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(SRC / t["src"], target)
+        if t.get("vanish_once") and t["filename"] not in VANISHED:
+            VANISHED.add(t["filename"])
+            target.unlink()              # simulate another app moving the finished file away
         t["state"], t["bytesTransferred"], t["percentComplete"] = "Completed, Succeeded", t["size"], 100.0
 
 
@@ -306,7 +317,7 @@ def user_downloads(request: Request, username: str):
         if t["removed"]:
             continue
         _advance(t)
-        files.append({k: v for k, v in t.items() if k not in ("created", "src", "fail", "dest", "removed")})
+        files.append({k: v for k, v in t.items() if k not in ("created", "src", "fail", "dest", "removed", "vanish_once")})
     if not files:
         raise HTTPException(404)
     return {"username": username, "directories": [{"directory": "x", "fileCount": len(files), "files": files}]}
@@ -526,6 +537,18 @@ def abs_chapters(request: Request, iid: str, body: dict = Body(...)):
     abs_auth(request)
     ABS["items"][iid]["chapters"] = body["chapters"]
     return {"success": True, "updated": True}
+
+
+@app.post("/abs/api/items/{iid}/scan")
+def abs_scan_item(request: Request, iid: str):
+    abs_auth(request)
+    it = ABS["items"][iid]
+    d = _abs_local(it["path"])
+    audio = sorted(p for p in d.rglob("*") if p.suffix.lower() in (".mp3", ".m4b", ".m4a", ".flac"))
+    it["audio"] = [p.name for p in audio]
+    it["size"] = sum(p.stat().st_size for p in audio)
+    ABS["scanned"] = ABS.get("scanned", []) + [iid]
+    return {"result": "UPDATED"}
 
 
 @app.get("/abs/api/items/{iid}/cover")

@@ -30,6 +30,10 @@ EXTRA_KEEP = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".cue", ".epub", ".nfo"}
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+def _mb(n: int) -> str:
+    return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB" if n >= 1e7 else f"{n / 1e6:.1f} MB"
+
+
 def safe_segment(s: str, limit: int = 120) -> str:
     s = re.sub(r"\s*:\s*", " - ", s)
     s = _ILLEGAL.sub("", s).replace("’", "'").strip().rstrip(".")
@@ -170,7 +174,7 @@ def unique_dest(dest: Path, asin: str | None) -> Path:
 
 
 async def process_book(src: Path, book: dict, settings, *, copy: bool = False, source_info: dict | None = None,
-                       log_fn=log.info) -> dict:
+                       log_fn=log.info, progress_fn=None) -> dict:
     """Organise + tag. Returns a summary used for the library record."""
     if not src.exists():
         raise FileNotFoundError(f"Source folder missing: {src}")
@@ -197,6 +201,31 @@ async def process_book(src: Path, book: dict, settings, *, copy: bool = False, s
                 if not target.exists():
                     _move_or_copy(p, target, copy)
     moved = sorted(moved, key=lambda p: natural_key(str(p.relative_to(dest))))
+
+    if settings.get("processing.reencode"):
+        import asyncio
+        from .reencode import current_kbps, effective_kbps, reencode, reencode_each, should_reencode
+        kbps = int(settings.get("processing.reencode_kbps") or 64)
+        merge = bool(settings.get("processing.reencode_merge"))
+        if should_reencode(moved, kbps, merge):
+            before = sum(p.stat().st_size for p in moved)
+            was = current_kbps(moved)
+            try:
+                if merge:
+                    kbps = effective_kbps(moved, kbps)
+                    log_fn(f"Re-encoding {len(moved)} file(s) ({was or 0:.0f} kbps) to one M4B at {kbps} kbps")
+                    moved = [await asyncio.to_thread(reencode, moved, dest,
+                                                     safe_segment(book.get("title") or "Audiobook"),
+                                                     book, kbps, progress_fn)]
+                else:
+                    log_fn(f"Re-encoding {len(moved)} file(s) ({was or 0:.0f} kbps) one by one at up to {kbps} kbps")
+                    moved = await asyncio.to_thread(reencode_each, moved, kbps, progress_fn)
+                log_fn(f"Re-encoded: {_mb(before)} → {_mb(sum(p.stat().st_size for p in moved))}")
+            except Exception as e:  # noqa: BLE001
+                moved = audio_files(dest)
+                log_fn(f"Re-encode failed, keeping the original files: {e}")
+        else:
+            log_fn("Re-encode skipped: already at or below the target bitrate")
 
     cover = None
     if settings.get("processing.save_cover") or settings.get("processing.embed_cover"):

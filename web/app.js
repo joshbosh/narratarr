@@ -83,6 +83,42 @@ function confirmDialog(title, message, okLabel = "Continue") {
       () => finish(false));
   });
 }
+async function reencodeFlow(url, { title, size, duration, files }) {
+  let kbps = 64, merge = true;
+  try { const st = await api("/api/system/status"); kbps = st.reencode_kbps || 64; merge = st.reencode_merge !== false; } catch { /* defaults */ }
+  const many = files && files > 1;
+  const est = duration ? duration * kbps * 1000 / 8 : null;
+  const sizeLine = est ? ` At most about ${fmtSize(est)}${size ? ` (now ${fmtSize(size)})` : ""}.` : "";
+  const msg = h("p", { class: "muted", style: { marginTop: "10px" } });
+  const box = h("input", { type: "checkbox" });
+  box.checked = merge;
+  const describe = () => msg.replaceChildren(box.checked
+    ? `${many ? `Joins the ${files} files into one M4B` : "Converts it to M4B"} at ${kbps} kbps, with chapters.${sizeLine} The original files are replaced, so their names aren't kept.`
+    : `Re-encodes ${many ? "each file that's above" : "the file if it's above"} ${kbps} kbps on its own, keeping names and folders (MP3 stays MP3; other formats become AAC .m4a).${sizeLine} The originals are replaced.`);
+  box.addEventListener("change", describe);
+  describe();
+  const ok = await new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; closeModal(); resolve(v); };
+    openModal(h("div", { class: "modal small" },
+      h("header", {}, h("div", {}, h("h2", { style: { margin: 0 } }, `Re-encode “${title}”`))),
+      h("div", { class: "body" },
+        h("label", { class: "row", style: { gap: "8px", marginTop: "10px", cursor: "pointer" } }, box,
+          many ? "Join into one M4B with chapters" : "Convert to M4B"),
+        msg,
+        h("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "18px" } },
+          h("button", { class: "btn ghost", onclick: () => finish(false) }, "Cancel"),
+          h("button", { class: "btn primary", onclick: () => finish(true) }, "Re-encode")))),
+      () => finish(false));
+  });
+  if (!ok) return false;
+  try {
+    await api(url, { method: "POST", body: { merge: box.checked } });
+    toast("Re-encoding — progress is in the sidebar and the Queue", "ok");
+    refreshActivity();
+    return true;
+  } catch (err) { toast(err.message, "bad"); return false; }
+}
 function absPill(ref) {
   if (!ref) return null;
   return h("a", { class: "pill abs", href: ref.link, target: "_blank", rel: "noopener", title: "Open in Audiobookshelf" }, "✓ In Audiobookshelf library");
@@ -290,6 +326,10 @@ function renderQueue(view) {
     acts.push(h("button", { class: `btn small ${j.status === "needs_review" ? "primary" : ""}`, onclick: () => openJob(j.id, load) }, j.status === "needs_review" ? "Pick source" : "Details"));
     if (["failed", "cancelled", "needs_review"].includes(j.status)) acts.push(btn("Retry", () => api(`/api/jobs/${j.id}/retry`, { method: "POST" })));
     if (["queued", "searching", "needs_review", "downloading"].includes(j.status)) acts.push(btn("Cancel", () => api(`/api/jobs/${j.id}/cancel`, { method: "POST" }), "small ghost danger"));
+    if (j.files_missing && j.status === "needs_review") {
+      acts.push(btn("Re-download missing", () => api(`/api/jobs/${j.id}/redownload-missing`, { method: "POST" }), "small primary"));
+      acts.push(btn("Import what's here", () => api(`/api/jobs/${j.id}/import-partial`, { method: "POST" })));
+    }
     if (j.status === "completed" && j.abs_status === "pending") acts.push(btn("Send to Audiobookshelf", () => api(`/api/jobs/${j.id}/abs`, { method: "POST" })));
     if (j.abs_link) acts.push(h("a", { class: "btn small", href: j.abs_link, target: "_blank", rel: "noopener" }, "Open in Audiobookshelf"));
     if (["completed", "failed", "cancelled"].includes(j.status)) acts.push(btn("Remove", () => api(`/api/jobs/${j.id}`, { method: "DELETE" }), "small ghost"));
@@ -297,7 +337,7 @@ function renderQueue(view) {
     return h("div", { class: "job" },
       cover(j.cover_url, j.title),
       h("div", {},
-        h("div", { class: "row" }, status(j.status), j.kind === "import" ? h("span", { class: "pill" }, "Manual import") : null, h("span", { class: "faint", style: { fontSize: "12px" } }, ago(j.created_at))),
+        h("div", { class: "row" }, status(j.status), j.kind === "import" ? h("span", { class: "pill" }, "Manual import") : j.kind === "reencode" ? h("span", { class: "pill" }, "Re-encode") : null, h("span", { class: "faint", style: { fontSize: "12px" } }, ago(j.created_at))),
         h("div", { class: "title", style: { marginTop: "4px" } }, j.title),
         h("div", { class: "muted", style: { fontSize: "13px" } }, names(j.authors), j.narrators?.length ? ` · read by ${names(j.narrators)}` : "", j.series?.length ? ` · ${seriesLabel(j.series[0])}` : ""),
         h("div", { class: "detail" }, j.error && j.status === "failed" ? j.error : j.detail),
@@ -510,6 +550,9 @@ async function openBook(id, onChange) {
       h("h3", {}, "Files"), h("div", { class: "log" }, (b.files || []).map((f) => h("div", {}, f))),
       h("div", { class: "row", style: { marginTop: "18px" } },
         send, absLink,
+        h("button", { class: "btn", onclick: async () => {
+          if (await reencodeFlow(`/api/library/${id}/reencode`, { title: b.title, size: b.size_bytes, duration: b.duration_s, files: b.file_count })) closeModal();
+        } }, "Re-encode"),
         h("span", { class: "grow" }),
         h("button", { class: "btn ghost", onclick: () => del(false) }, "Remove from list"),
         h("button", { class: "btn ghost danger", onclick: () => del(true) }, "Delete files")))));
@@ -540,7 +583,10 @@ async function openAbsBook(itemId) {
       b.description ? h("p", { class: "muted", style: { whiteSpace: "pre-line", maxWidth: "80ch" } }, b.description) : null,
       h("h3", {}, "Folder in Audiobookshelf"), h("div", { class: "path" }, b.path || "—"),
       h("div", { class: "row", style: { marginTop: "18px" } },
-        h("a", { class: "btn primary", href: b.link, target: "_blank", rel: "noopener" }, "Open in Audiobookshelf")))));
+        h("a", { class: "btn primary", href: b.link, target: "_blank", rel: "noopener" }, "Open in Audiobookshelf"),
+        h("button", { class: "btn", onclick: async () => {
+          if (await reencodeFlow(`/api/abs/items/${itemId}/reencode`, { title: b.title, size: b.size_bytes, duration: b.duration_s, files: b.num_tracks })) closeModal();
+        } }, "Re-encode")))));
 }
 
 // ============================================================ MANUAL IMPORT
@@ -707,6 +753,42 @@ async function renderSettings(view) {
   }
 }
 
+// ------------------------------------------------------------- activity panel
+const ACT_ICON = { searching: "search", downloading: "down", processing: "gear", abs: "up", sync: "sync",
+  completed: "ok", failed: "bad", needs_review: "warn" };
+function actIcon(kind) {
+  const k = ACT_ICON[kind] || "gear";
+  const paths = {
+    search: '<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>',
+    down: '<path d="M8 2v9M4.5 7.5L8 11l3.5-3.5M3 14h10"/>',
+    up: '<path d="M8 13V4M4.5 7.5L8 4l3.5 3.5M3 2h10"/>',
+    gear: '<circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/>',
+    sync: '<path d="M13 6A5 5 0 0 0 3.5 4.5M3 10a5 5 0 0 0 9.5 1.5"/><path d="M3 2v3h3M13 14v-3h-3"/>',
+    ok: '<path d="M3 8.5l3 3 7-7"/>', bad: '<path d="M4 4l8 8M12 4l-8 8"/>', warn: '<path d="M8 3v6M8 12v.5"/>',
+  };
+  const el = h("span", { class: `act-icon ${k}` });
+  el.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[k]}</svg>`;
+  return el;
+}
+async function refreshActivity() {
+  const box = $("#activity");
+  let data;
+  try { data = await api("/api/activity"); } catch { return; }
+  const items = data.items || [];
+  const rows = items.slice(0, 5).map((it) => h("div", {
+      class: `act-row ${it.kind}`, title: `${it.title} — ${it.text}`,
+      onclick: () => { if (it.id) { if (location.pathname !== "/queue") navigate("/queue"); openJob(it.id); } } },
+    actIcon(it.kind),
+    h("div", { class: "act-body" },
+      h("div", { class: "act-title" }, it.title),
+      h("div", { class: "act-text" }, it.text),
+      it.progress != null && it.progress > 0 && it.progress < 100 ? h("div", { class: "act-bar" }, h("i", { style: { width: `${it.progress}%` } })) : null)));
+  if (data.queued) rows.push(h("div", { class: "act-row queued", onclick: () => navigate("/queue") }, actIcon("gear"),
+    h("div", { class: "act-body" }, h("div", { class: "act-text" }, `${data.queued} waiting in the queue`))));
+  box.replaceChildren(...rows);
+  box.hidden = !rows.length;
+}
+
 // ------------------------------------------------------------- background
 async function refreshBadge() {
   try {
@@ -727,6 +809,7 @@ async function refreshFoot() {
 }
 
 route();
-refreshBadge(); refreshFoot();
+refreshBadge(); refreshFoot(); refreshActivity();
 setInterval(refreshBadge, 5000);
+setInterval(refreshActivity, 2500);
 setInterval(refreshFoot, 30000);

@@ -36,13 +36,20 @@
   (folding `CD1`/`Disc 2` sub-folders together), fuzzy-scores them against the Audible record, and downloads the best match.
   Runtime is the strongest signal, which separates abridged editions and different narrations.
 - **Falls back automatically.** A source that errors, times out or stalls is retried, then the next candidate is tried.
-  If slskd itself is busy, Narratarr backs off rather than burning through sources.
-- **Tags without renaming.** Filenames are kept as downloaded. Files get full tags (title, author, narrator, series and
+  If slskd itself is busy, Narratarr backs off rather than burning through sources. If another app moves a finished
+  file out of slskd's folder, the rest of the book keeps downloading and the job waits in *Needs review* with
+  **Re-download missing** and **Import what's here**.
+- **Activity panel:** the bottom of the sidebar shows what's happening right now (searching, downloading,
+  re-encoding, sending to Audiobookshelf), like the *arr apps.
+- **Tags without renaming.** Filenames are kept as downloaded (unless you choose to join a book into one M4B). Files get full tags (title, author, narrator, series and
   part, ASIN, description, genres, year, track and disc numbers, embedded cover). Single-file books get Audible's chapter
   list when the file has none and the length matches.
 - **Hands off to Audiobookshelf.** Each finished book is moved or copied into your library folder, Audiobookshelf is
   asked to scan just that folder, the new item is matched by path, and missing metadata is filled in. Anything that
   can't finish (Audiobookshelf down, folder not mounted) waits as *pending* and retries.
+- **Re-encode to save space:** shrink books to a lean bitrate with the bundled FFmpeg, either joined into one M4B with
+  chapters or file by file keeping their names. Automatic for new books if you turn it on, or on demand with the
+  **Re-encode** button on any Library or Audiobookshelf book. See [Re-encoding](#re-encoding).
 - **Manual Import:** point it at any folder of audio, match it to an Audible release, and it gets the same treatment.
 
 Narratarr is on-demand only: there's no author or new-release monitoring.
@@ -186,7 +193,7 @@ them (`user:` in compose). This is usually the same one slskd runs as.
 > [!NOTE]
 > Other tools that watch slskd's completed folder, such as music auto-importers, may grab audiobook downloads before
 > Narratarr does. Either exclude Narratarr's files from them, or give Narratarr its own slskd instance with its own
-> downloads folder.
+> downloads folder. If it happens, the job waits in *Needs review* where you can re-download just the missing files.
 
 ## slskd
 
@@ -216,6 +223,28 @@ library as separate sections.
 
 Each book folder also gets `cover.jpg`, `desc.txt`, `reader.txt`, `metadata.opf` and an Audiobookshelf-format
 `metadata.json`, so the scanner picks up the right metadata even without the API.
+
+## Re-encoding
+
+Audiobook rips are often far bigger than speech needs. Narratarr can re-encode them at a lean bitrate (64 kbps by
+default, which is plenty for speech) in one of two ways:
+
+| Mode | Result | Names kept |
+|---|---|---|
+| **Join into one M4B** (default) | One `<Title>.m4b` (AAC) with chapters: Audible's chapter list when it fits the length, otherwise one chapter per original file. Disc folders are removed. | No |
+| **File by file** | Each file is re-encoded on its own, in its own folder. MP3 stays MP3, M4B/M4A stay AAC, and other formats (FLAC, WAV, OGG, WMA) become AAC `.m4a` with the same base name. Files already at a lean bitrate are left alone. | Yes |
+
+- **Automatic** (off by default): *Settings → Processing → Re-encode to save space* re-encodes each finished book
+  before it's tagged and sent to Audiobookshelf. *Join into one M4B when re-encoding* (on by default) picks the mode.
+- **On demand:** open any book in the Library, including Audiobookshelf books, and press **Re-encode**. The dialog
+  shows the current size and an estimate, and lets you choose whether to join. It runs as a Queue job with progress in
+  the sidebar. Audiobookshelf books are re-encoded in their own folder, re-tagged from Audiobookshelf's metadata, and
+  Audiobookshelf is asked to rescan the item.
+
+It only runs when it helps: joining several files, or files more than 25% above the target bitrate. It never encodes
+above the source's own bitrate, so lean files can't grow. Each new file is checked against the original's length before
+the original is deleted; if anything fails, the files not yet re-encoded are kept. Re-encoding is lossy, so keep a
+backup if you might want the originals back.
 
 ## Metadata sources
 
@@ -255,6 +284,9 @@ Candidates are scored on:
 | Format | 8% | Your preference order, default `m4b, mp3, m4a, flac, opus, ogg` |
 | Availability | 7% | Free upload slot, queue length, speed |
 
+Size counts a little too: copies above 160 kbps lose a few points, and ones below 32 kbps lose more, so a lean
+copy wins between two equally good matches. It's never enough to make a partial or wrong copy win over a complete one.
+
 Penalties apply for another narrator of the same title, *abridged* or *dramatised* versions, samples, and a different
 series number. Results below the threshold wait in **Needs review**, where you can see each candidate's score with the
 reasons and pick one, or run a custom search.
@@ -293,6 +325,9 @@ first-run default with an environment variable. The variable only applies until 
 | `NARRATARR_PROCESSING__EMBED_COVER` | Embed cover art in files | `true` |
 | `NARRATARR_PROCESSING__SAVE_COVER` | Save cover.jpg | `true` |
 | `NARRATARR_PROCESSING__EMBED_CHAPTERS` | Embed chapters in single-file books | `true` |
+| `NARRATARR_PROCESSING__REENCODE` | Re-encode to save space | `false` |
+| `NARRATARR_PROCESSING__REENCODE_MERGE` | Join into one M4B when re-encoding | `true` |
+| `NARRATARR_PROCESSING__REENCODE_KBPS` | Re-encode bitrate (kbps) | `64` |
 | `NARRATARR_PROCESSING__SIDECARS` | Write metadata.opf / metadata.json / desc.txt / reader.txt | `true` |
 | `NARRATARR_ABS__ENABLED` | Send finished books to Audiobookshelf | `false` |
 | `NARRATARR_ABS__URL` | Audiobookshelf URL | `http://audiobookshelf:80` |
@@ -339,9 +374,10 @@ pip install -r requirements.txt
 python tests/e2e.py
 ```
 
-The end-to-end suite starts mock Audible, Audnexus, slskd and Audiobookshelf servers (`tests/mocks/mock_server.py`) and
-runs real scenarios against them: narrator-specific matching, multi-disc books, failing and busy sources, manual picks,
-manual import, region fallback, and the full Audiobookshelf hand-off. It needs `ffmpeg` on your PATH. On Windows,
+The end-to-end suite starts mock Audible, Audnexus, Hardcover, slskd and Audiobookshelf servers
+(`tests/mocks/mock_server.py`) and runs real scenarios against them: narrator-specific matching, multi-disc books,
+failing and busy sources, manual picks, manual import, region fallback, Hardcover gap-filling and fallback, bitrate
+scoring, files going missing mid-download, re-encoding (joined and file by file), and the full Audiobookshelf hand-off. It needs `ffmpeg` on your PATH. On Windows,
 use `.venv\Scripts\python.exe` in place of `python`.
 
 To run the app against the mocks and click around, see the environment variables used in `tests/e2e.py`.
@@ -357,6 +393,7 @@ app/
   matching.py      query variations, grouping, scoring
   slskd.py         slskd API client
   postprocess.py   organise, cover, sidecars
+  reencode.py      FFmpeg re-encoding (joined M4B or file by file)
   tagging.py       mutagen tagging and chapter embedding
   library.py       library rescan, import folder discovery
   providers/       metadata sources (Audible, Audnexus, Hardcover); add new ones here

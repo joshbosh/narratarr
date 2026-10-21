@@ -283,6 +283,23 @@ def score_candidate(cand: dict, book: dict, ctx: dict) -> None:
 
     score = 0.45 * title_score + 0.15 * author_score + 0.25 * runtime_score + 0.08 * format_score + 0.07 * avail
 
+    # --- size: prefer lean files. Speech is fine at 64 kbps; very large copies lose a few points,
+    # never enough to beat a better match. Very low bitrates sound poor.
+    kbps = bitrate_kbps(cand)
+    cand["kbps"] = kbps
+    if kbps:
+        if kbps > 256:
+            score -= 6
+            reasons.append(f"{kbps} kbps (large)")
+        elif kbps > 160:
+            score -= 3
+            reasons.append(f"{kbps} kbps (large)")
+        elif kbps < 32:
+            score -= 8
+            reasons.append(f"{kbps} kbps (low quality)")
+        else:
+            reasons.append(f"{kbps} kbps")
+
     # --- bonuses / penalties
     if ctx["narrator_lasts"] and any(n in full_tokens for n in ctx["narrator_lasts"]):
         score += 4
@@ -315,6 +332,15 @@ def score_candidate(cand: dict, book: dict, ctx: dict) -> None:
     cand["score"] = round(max(0.0, min(100.0, score)), 1)
     cand["rank"] = round(score, 2)  # unclamped, so bonuses still order 100-scorers
     cand["reasons"] = reasons
+
+
+def bitrate_kbps(cand: dict) -> int | None:
+    """Average bitrate from total size and length, else the files' reported bitrate."""
+    length = cand.get("length_s")
+    if length and cand.get("size"):
+        return round(cand["size"] * 8 / length / 1000)
+    rates = [f["bitrate"] for f in cand.get("files") or [] if f.get("bitrate")]
+    return round(sum(rates) / len(rates)) if rates else None
 
 
 def scoring_context(book: dict, formats: list[str], tolerance_pct: float, alt_narrators: list[str] | None = None) -> dict:

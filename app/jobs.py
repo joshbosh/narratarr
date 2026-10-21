@@ -8,6 +8,7 @@ so a restart picks up where it left off.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -438,7 +439,7 @@ class JobManager:
                 latest[fn] = r
         failure = None
         for t in transfers:
-            if t.get("local"):
+            if t.get("local") or t.get("missing_local"):
                 continue
             r = latest.get(t["filename"])
             if not r:
@@ -462,11 +463,19 @@ class JobManager:
                     if t["locate_attempts"] == 3:
                         self.log(job_id, f"Finished file not found under slskd downloads path: {t['name']}")
                     if t["locate_attempts"] > 20:
-                        self.update(job_id, transfers=transfers, status="failed",
-                                    error="Downloaded files not found — check the slskd downloads folder setting "
-                                          "and that it's mounted into this container",
-                                    detail="Can't find downloaded files")
-                        return
+                        if not any(x.get("local") or x.get("missing_local") for x in transfers):
+                            # nothing from this book has ever been found: almost certainly a mount problem
+                            self.update(job_id, transfers=transfers, status="failed",
+                                        error="Downloaded files not found — check the slskd downloads folder setting "
+                                              "and that it's mounted into this container",
+                                        detail="Can't find downloaded files")
+                            return
+                        # other files arrived fine, so something else moved this one; carry on with the rest
+                        t["missing_local"] = True
+                        t["state"] = "Missing after download"
+                        self.log(job_id, f"{t['name']} finished in slskd but disappeared before Narratarr could move it. "
+                                         "Another app watching slskd's completed folder (e.g. a music auto-importer) "
+                                         "probably took it. Continuing with the other files.")
             elif transfer_failed(t["state"]):
                 if time.time() < t.get("retry_after", 0):
                     continue
@@ -487,14 +496,15 @@ class JobManager:
                     failure = f"{t['name']}: {t['state']}"
 
         total = sum(t["size"] for t in transfers) or 1
-        done = sum(t["size"] if t.get("local") else t.get("bytes", 0) for t in transfers)
+        done = sum(t["size"] if (t.get("local") or t.get("missing_local")) else t.get("bytes", 0) for t in transfers)
         progress = round(done / total * 100, 1)
         now = time.time()
         if done > selected.get("last_bytes", 0):
             selected["last_bytes"] = done
             selected["last_progress_at"] = now
         n_local = sum(1 for t in transfers if t.get("local"))
-        states = {t["state"] for t in transfers if not t.get("local")}
+        n_missing = sum(1 for t in transfers if t.get("missing_local"))
+        states = {t["state"] for t in transfers if not t.get("local") and not t.get("missing_local")}
         detail = f"{n_local}/{len(transfers)} files · {progress:.0f}%" + (f" · {', '.join(sorted(states))}" if states else "")
         self.update(job_id, transfers=transfers, progress=progress, selected=selected, detail=detail)
 
@@ -505,13 +515,112 @@ class JobManager:
         if now - selected.get("last_progress_at", now) > stall:
             await self._next_candidate(job_id, f"no progress for {self.settings.get('slskd.stall_minutes')} min")
             return
-        if n_local == len(transfers):
-            self.update(job_id, status="processing", detail="Download complete — processing", progress=100)
-            self.log(job_id, "All files downloaded")
+        if n_local + n_missing == len(transfers):
+            if n_missing:
+                self.update(job_id, status="needs_review", progress=100,
+                            detail=f"{n_missing} of {len(transfers)} file(s) went missing after downloading — "
+                                   "another app probably moved them. Re-download them, or import what's here.")
+                self.log(job_id, f"Downloads finished; {n_missing} file(s) missing")
+            else:
+                self.update(job_id, status="processing", detail="Download complete — processing", progress=100)
+                self.log(job_id, "All files downloaded")
 
     # -------------------------------------------------------------- processing
+    def create_reencode(self, book: dict, folder: Path, abs_item_id: str | None = None,
+                        library_id: int | None = None, user_id: str | None = None, merge: bool = True) -> int:
+        s = _book_summary(book)
+        s["asin"] = book.get("asin") or book.get("ref")
+        now = time.time()
+        book = {**book, "_library_id": library_id, "_merge": bool(merge)}
+        jid = self.db.insert("jobs", {
+            "kind": "reencode", **s, "book": book, "status": "processing", "detail": "Waiting to re-encode",
+            "staging_path": str(folder), "abs_item_id": abs_item_id, "requested_by": user_id,
+            "created_at": now, "updated_at": now,
+        })
+        self.log(jid, f"Re-encode requested for {folder}")
+        return jid
+
+    async def run_reencode(self, job_id: int) -> None:
+        from .postprocess import _mb, audio_files, safe_segment
+        from .reencode import current_kbps, effective_kbps, embedded_cover, reencode, reencode_each, should_reencode
+        from .tagging import audio_length, tag_book
+        job = self.get(job_id)
+        folder = Path(job["staging_path"])
+        merge = (job["book"] or {}).get("_merge", True)
+        book = {k: v for k, v in (job["book"] or {}).items() if not k.startswith("_")}
+        kbps = int(self.settings.get("processing.reencode_kbps") or 64)
+        try:
+            if not folder.is_dir():
+                raise FileNotFoundError(f"Folder not found: {folder}")
+            files = audio_files(folder)
+            if not should_reencode(files, kbps, merge):
+                self.update(job_id, status="completed", output_path=str(folder),
+                            detail=f"Nothing to do: already at or below {kbps} kbps")
+                return
+            before = sum(p.stat().st_size for p in files)
+            cover = None
+            for name in ("cover.jpg", "cover.jpeg", "cover.png"):
+                if (folder / name).exists():
+                    cover = (folder / name).read_bytes()
+                    break
+            if cover is None:
+                cover = await asyncio.to_thread(embedded_cover, files[0])
+            label = "Re-encoding to M4B" if merge else "Re-encoding"
+            self.update(job_id, detail=f"{label} · 0%")
+            prog = lambda pct: self.update(job_id, detail=f"{label} · {pct}%")  # noqa: E731
+            if merge:
+                kbps = effective_kbps(files, kbps)
+                self.log(job_id, f"Joining {len(files)} file(s) ({current_kbps(files) or 0:.0f} kbps) into one M4B at {kbps} kbps")
+                new_files = [await asyncio.to_thread(reencode, files, folder,
+                                                     safe_segment(book.get("title") or "Audiobook"), book, kbps, prog)]
+            else:
+                self.log(job_id, f"Re-encoding {len(files)} file(s) ({current_kbps(files) or 0:.0f} kbps) one by one "
+                                 f"at up to {kbps} kbps, keeping their names")
+                new_files = await asyncio.to_thread(reencode_each, files, kbps, prog)
+            if self.settings.get("processing.write_tags"):
+                await asyncio.to_thread(tag_book, new_files, book,
+                                        cover if self.settings.get("processing.embed_cover") else None, False,
+                                        lambda m: self.log(job_id, m))
+            after = sum(p.stat().st_size for p in new_files)
+            duration = sum(audio_length(p) or 0 for p in new_files)
+            summary = {"file_count": len(new_files), "size_bytes": after, "duration_s": round(duration, 1)}
+            lib_id = (job["book"] or {}).get("_library_id")
+            if lib_id:
+                self.db.update("library", lib_id, summary)
+            marker = folder / ".narratarr.json"
+            if marker.exists():
+                try:
+                    data = json.loads(marker.read_text(encoding="utf-8"))
+                    data.setdefault("summary", {}).update(summary)
+                    marker.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                except (OSError, ValueError):
+                    pass
+            item_id = job.get("abs_item_id")
+            if item_id and self.abs.enabled:
+                try:
+                    await self.abs.client().scan_item(item_id)
+                    self.log(job_id, "Asked Audiobookshelf to rescan the item")
+                except Exception as e:  # noqa: BLE001
+                    self.log(job_id, f"Audiobookshelf rescan failed (it will pick the change up on its next scan): {e}")
+                try:
+                    await self.abs.refresh_index()
+                except Exception:  # noqa: BLE001
+                    pass
+            msg = f"Re-encoded: {_mb(before)} → {_mb(after)}"
+            self.log(job_id, msg)
+            self.update(job_id, status="completed", output_path=str(folder), progress=100, detail=msg)
+        except Exception as e:  # noqa: BLE001
+            log.exception("re-encode failed for job %s", job_id)
+            self.update(job_id, status="failed", error=str(e),
+                        detail="Re-encode failed — original files kept" if merge
+                        else "Re-encode failed — files not yet re-encoded were kept")
+            self.log(job_id, f"Re-encode failed: {e}")
+
     async def run_processing(self, job_id: int) -> None:
         job = self.get(job_id)
+        if job and job["kind"] == "reencode":
+            await self.run_reencode(job_id)
+            return
         src = Path(job["staging_path"] or self.staging_dir(job))
         book = clean_contributors({k: v for k, v in job["book"].items()})
         try:
@@ -524,7 +633,8 @@ class JobManager:
                       "query": selected.get("query"), "local_source": str(src) if job["kind"] == "import" else None}
             clean_book = {k: v for k, v in book.items() if not k.startswith("_")}
             summary = await process_book(src, clean_book, self.settings, copy=job.get("import_mode") == "copy",
-                                         source_info=source, log_fn=lambda m: self.log(job_id, m))
+                                         source_info=source, log_fn=lambda m: self.log(job_id, m),
+                                         progress_fn=lambda pct: self.update(job_id, detail=f"Re-encoding to M4B · {pct}%"))
             self._library_upsert(job, clean_book, summary)
             send = self.abs.enabled
             self.update(job_id, status="completed", output_path=summary["path"], progress=100,
@@ -650,12 +760,13 @@ class JobManager:
                 for job in self.db.query("SELECT id FROM jobs WHERE status='downloading'"):
                     await self.check_download(job["id"])
                 for job in self.db.query("SELECT id FROM jobs WHERE status='processing' ORDER BY updated_at"):
-                    if job["id"] not in self._busy:
-                        self._busy.add(job["id"])
-                        try:
-                            await self.run_processing(job["id"])
-                        finally:
-                            self._busy.discard(job["id"])
+                    # one book at a time, in the background, so a long re-encode doesn't stall downloads
+                    if not self._busy:
+                        jid = job["id"]
+                        self._busy.add(jid)
+                        task = asyncio.create_task(self.run_processing(jid), name=f"process-{jid}")
+                        task.add_done_callback(lambda t, jid=jid: self._busy.discard(jid))
+                    break
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -677,10 +788,61 @@ class JobManager:
         self.log(job_id, "Cancelled")
         self.wake.set()                         # let the next queued job start immediately
 
+    async def redownload_missing(self, job_id: int) -> int:
+        job = self.get(job_id)
+        transfers = job.get("transfers") or []
+        missing = [t for t in transfers if t.get("missing_local")]
+        if not missing:
+            return 0
+        client = self.slskd()
+        for t in missing:
+            if t.get("transfer_id"):
+                await client.cancel(t["username"], t["transfer_id"], remove=True)
+            await client.enqueue(t["username"], [t], t["dest"])
+            t.update({"missing_local": False, "state": "Requested", "percent": 0, "bytes": 0, "locate_attempts": 0,
+                      "missing": 0, "transfer_id": None})
+        selected = job.get("selected") or {}
+        selected["last_progress_at"] = time.time()
+        self.update(job_id, status="downloading", transfers=transfers, selected=selected,
+                    detail=f"Re-downloading {len(missing)} missing file(s)", error=None)
+        self.log(job_id, f"Re-downloading {len(missing)} missing file(s)")
+        return len(missing)
+
+    def import_partial(self, job_id: int) -> None:
+        job = self.get(job_id)
+        n = sum(1 for t in job.get("transfers") or [] if t.get("local"))
+        self.update(job_id, status="processing", detail=f"Importing the {n} file(s) that arrived")
+        self.log(job_id, f"Importing {n} file(s) without the missing ones")
+
+    def activity(self) -> dict:
+        """What's happening right now, for the sidebar activity panel."""
+        now = time.time()
+        items = []
+        for j in self.db.query("SELECT id, title, status, detail, progress, abs_status, updated_at FROM jobs "
+                               "WHERE status IN ('searching','downloading','processing') ORDER BY updated_at DESC"):
+            items.append({"id": j["id"], "title": j["title"], "kind": j["status"], "text": j["detail"] or "",
+                          "progress": j["progress"] if j["status"] in ("downloading", "processing") else None})
+        for jid in list(self._abs_inflight):
+            j = self.get(jid)
+            if j:
+                items.append({"id": jid, "title": j["title"], "kind": "abs", "text": j.get("abs_detail") or
+                              "Sending to Audiobookshelf", "progress": None})
+        if self.abs.syncing:
+            items.append({"id": None, "title": "Audiobookshelf", "kind": "sync", "text": "Syncing library", "progress": None})
+        recent = self.db.query("SELECT id, title, status, detail FROM jobs WHERE updated_at > ? "
+                               "AND status IN ('completed','failed','needs_review') ORDER BY updated_at DESC LIMIT 3",
+                               (now - 12,))
+        for j in recent:
+            items.append({"id": j["id"], "title": j["title"], "kind": j["status"],
+                          "text": {"completed": "Completed", "failed": "Failed", "needs_review": "Needs review"}[j["status"]],
+                          "progress": None})
+        queued = self.db.one("SELECT COUNT(*) n FROM jobs WHERE status='queued'")["n"]
+        return {"items": items, "queued": queued}
+
     def retry(self, job_id: int) -> None:
         job = self.get(job_id)
-        if job["kind"] == "import":
-            self.update(job_id, status="processing", detail="Retrying import", error=None)
+        if job["kind"] in ("import", "reencode"):
+            self.update(job_id, status="processing", detail="Retrying", error=None)
         elif job.get("staging_path") and Path(job["staging_path"]).exists() and \
                 all(t.get("local") for t in job.get("transfers") or [{}]) and job.get("transfers"):
             self.update(job_id, status="processing", detail="Retrying processing", error=None)

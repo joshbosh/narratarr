@@ -321,6 +321,75 @@ def main():
         httpx.post(f"http://127.0.0.1:{MOCK_PORT}/mock/config", json={"audible_down": False})
         c.put("/api/settings", json={"metadata.hardcover_enabled": False}).raise_for_status()
 
+        # 6d — size: lean copies preferred, large ones lose a little, never enough to beat a better match
+        print("Scenario 6d: bitrate in scoring")
+        sys.path.insert(0, str(ROOT))
+        from app import matching as M
+        bk = {"title": "Lean Book", "authors": [{"name": "Lee Lean"}], "narrators": [], "series": [], "runtime_min": 600}
+        ctx = M.scoring_context(bk, ["m4b", "mp3"], 8)
+        def resp(user, kbps, length=36000):
+            return {"username": user, "hasFreeUploadSlot": True, "queueLength": 0, "uploadSpeed": 2_000_000,
+                    "files": [{"filename": f"@@{user}\\Lee Lean\\Lean Book\\Lean Book.mp3", "extension": "mp3",
+                               "size": int(kbps * 1000 / 8 * length), "length": length}]}
+        cands = {c["username"]: c for c in M.build_candidates([resp("lean", 64), resp("big", 180), resp("huge", 320),
+                                                               resp("tiny", 24)], bk, ctx)}
+        order = sorted(cands, key=lambda u: cands[u]["rank"], reverse=True)
+        assert order == ["lean", "big", "huge", "tiny"], [(u, cands[u]["score"]) for u in order]
+        assert cands["lean"]["kbps"] == 64 and any("large" in r for r in cands["big"]["reasons"])
+        partial = M.build_candidates([resp("partial", 64, length=5400)], bk, ctx)[0]
+        assert cands["huge"]["score"] > partial["score"], "a large complete copy still beats a lean partial one"
+        ok(f"order {order}; scores " + ", ".join(f"{u} {cands[u]['score']}" for u in order) + f"; partial {partial['score']}")
+
+        # 6e — optional re-encode to a single M4B
+        print("Scenario 6e: re-encode to one M4B")
+        c.put("/api/settings", json={"processing.reencode": True, "processing.reencode_kbps": 64}).raise_for_status()
+        jid = request(c, search(c, "chapter book")[0])
+        j = wait_status(c, jid, {"completed", "failed", "needs_review"}, 120)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        out = Path(j["output_path"])
+        audio = sorted(p.name for p in out.rglob("*") if p.suffix in (".mp3", ".m4b"))
+        assert audio == ["Chapter Book.m4b"], audio
+        m4b = out / "Chapter Book.m4b"
+        probe = json.loads(subprocess.run(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_chapters",
+                                           "-show_format", str(m4b)], capture_output=True, text=True).stdout)
+        titles = [ch["tags"]["title"] for ch in probe["chapters"]]
+        assert titles == ["01 - Chapter Book", "02 - Chapter Book", "03 - Chapter Book"], titles
+        assert abs(float(probe["format"]["duration"]) - 45) < 2, probe["format"]["duration"]
+        assert mutagen.File(str(m4b))["\xa9alb"] == ["Chapter Book"]
+        assert any("Re-encoded:" in l["msg"] for l in j["log"]), [l["msg"] for l in j["log"]]
+        ok(f"3 MP3s → one M4B with chapters {titles}, tagged, originals removed")
+        c.put("/api/settings", json={"processing.reencode": False}).raise_for_status()
+
+        # 6f — a file taken by another app: keep going, then re-download just that file
+        print("Scenario 6f: file moved away by another app")
+        jid = request(c, search(c, "vanish book")[0])
+        seen_activity = False
+        for _ in range(120):
+            j = c.get(f"/api/jobs/{jid}").json()
+            act = c.get("/api/activity").json()
+            seen_activity = seen_activity or any(i["id"] == jid and i["kind"] == "downloading" for i in act["items"])
+            if j["status"] in ("needs_review", "completed", "failed"):
+                break
+            time.sleep(1)
+        assert j["status"] == "needs_review", (j["status"], j["detail"], [l["msg"] for l in j["log"]])
+        lj = next(x for x in c.get("/api/jobs?scope=active").json() if x["id"] == jid)
+        assert lj["files_missing"] == 1 and lj["files_done"] == 2, lj
+        assert any("disappeared" in l["msg"] for l in j["log"])
+        assert seen_activity, "download showed in the activity panel"
+        ok("one file vanished: the other two were kept, job parked with 1 missing file")
+        folders = c.get("/api/import/scan", params={"root": "incomplete"}).json()
+        staged = next(f for f in folders if f["name"].endswith("Vanish Book"))
+        assert staged["suggestion"] == "Val Vanish Vanish Book", staged["suggestion"]
+        ok(f"Manual Import suggests “{staged['suggestion']}” for the staging folder (no job number)")
+        c.post(f"/api/jobs/{jid}/redownload-missing").raise_for_status()
+        j = wait_status(c, jid, {"completed", "failed", "needs_review"}, 90)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        assert len(list(Path(j["output_path"]).glob("*.mp3"))) == 3
+        ok("re-downloaded just the missing file; book completed with all 3 files")
+        recent = c.get("/api/activity").json()["items"]
+        assert any(i["id"] == jid and i["kind"] == "completed" for i in recent), recent
+        ok("activity panel shows the finished book briefly")
+
         # 7 — Audiobookshelf
         print("Scenario 7: Audiobookshelf integration")
         abs_local = WORK / "abs-library"
@@ -418,6 +487,61 @@ def main():
         ok("folder watcher off → fell back to a library scan and still matched the item")
         assert c.get(f"/api/abs/items/li_exist/cover").status_code == 200
         ok("Audiobookshelf covers proxied")
+
+        # 8 — on-demand re-encode of a Narratarr library item and an Audiobookshelf item
+        print("Scenario 8: Re-encode button")
+        lib = c.get("/api/library").json()
+        road = next(b for b in lib["narratarr"] if b["title"] == "Long Road Home")
+        r = c.post(f"/api/library/{road['id']}/reencode"); r.raise_for_status()
+        j = wait_status(c, r.json()["job_id"], {"completed", "failed"}, 120)
+        assert j["status"] == "completed" and "Re-encoded" in j["detail"], (j["detail"], [l["msg"] for l in j["log"]])
+        audio = sorted(p.name for p in Path(road["path"]).rglob("*") if p.suffix in (".mp3", ".m4b"))
+        assert audio == ["Long Road Home.m4b"], audio
+        assert c.get(f"/api/library/{road['id']}").json()["file_count"] == 1
+        assert any("at 32 kbps" in l["msg"] for l in j["log"]), "lean (32 kbps) source isn't re-encoded at a higher bitrate"
+        ok(f"Narratarr library item: 4 MP3s → {audio[0]} ({j['detail']})")
+        abs_id = c.get(f"/api/jobs/{rj}").json()["abs_item_id"]
+        r = c.post(f"/api/abs/items/{abs_id}/reencode"); r.raise_for_status()
+        j = wait_status(c, r.json()["job_id"], {"completed", "failed"}, 120)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        abs_dir = abs_local / "Sam Writer/Road Series/Book 2 - Long Road Home"
+        audio = sorted(p.name for p in abs_dir.rglob("*") if p.suffix in (".mp3", ".m4b"))
+        assert audio == ["Long Road Home.m4b"], audio
+        mock_abs = httpx.get(f"http://127.0.0.1:{MOCK_PORT}/mock/abs/items").json()[abs_id]
+        assert mock_abs["audio"] == ["Long Road Home.m4b"], mock_abs["audio"]
+        t = mutagen.File(str(abs_dir / "Long Road Home.m4b"))
+        assert t["\xa9alb"] == ["Long Road Home"] and t["\xa9wrt"] == ["Kim Narrator"], dict(t.tags or {}).keys()
+        ok("Audiobookshelf item re-encoded in place, tagged from its Audiobookshelf metadata, item rescanned")
+        # file by file: names and folders kept, lean files left alone, FLAC → .m4a
+        lib = c.get("/api/library").json()
+        other = next(b for b in lib["narratarr"] if b["title"] != "Long Road Home" and Path(b["path"]).is_dir())
+        folder = Path(other["path"])
+        for p in folder.rglob("*"):
+            if p.is_file() and p.suffix.lower() in (".mp3", ".m4b", ".m4a", ".flac"):
+                p.unlink()
+        (folder / "CD2").mkdir(exist_ok=True)
+        def tone(path, *codec):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=400:duration=20",
+                            *codec, str(path)], check=True)
+        tone(folder / "00 Intro.mp3", "-c:a", "libmp3lame", "-b:a", "32k")
+        tone(folder / "01 Part.mp3", "-c:a", "libmp3lame", "-b:a", "192k")
+        tone(folder / "02 Part.mp3", "-c:a", "libmp3lame", "-b:a", "192k")
+        tone(folder / "CD2" / "03 Part.flac", "-c:a", "flac")
+        r = c.post(f"/api/library/{other['id']}/reencode", json={"merge": False}); r.raise_for_status()
+        j = wait_status(c, r.json()["job_id"], {"completed", "failed"}, 120)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        audio = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*")
+                       if p.suffix in (".mp3", ".m4a", ".flac", ".m4b"))
+        assert audio == ["00 Intro.mp3", "01 Part.mp3", "02 Part.mp3", "CD2/03 Part.m4a"], audio
+        assert round(mutagen.File(str(folder / "00 Intro.mp3")).info.bitrate / 1000) == 32, "lean file was re-encoded"
+        rate = mutagen.File(str(folder / "01 Part.mp3")).info.bitrate / 1000
+        assert 56 <= rate <= 72, rate
+        assert c.get(f"/api/library/{other['id']}").json()["file_count"] == 4
+        assert not list(folder.rglob(".narratarr-tmp-*"))
+        ok(f"file by file: {audio} kept their names, lean intro untouched, 192 kbps → {rate:.0f} kbps ({j['detail']})")
+        assert c.post(f"/api/library/{other['id']}/reencode", json={"merge": False}).status_code == 409
+        assert c.post("/api/abs/items/li_exist/reencode").status_code == 409
+        ok("single file already at a low bitrate: refused with 'nothing to gain'")
     except AssertionError as e:
         failures += 1
         print("FAIL:", e)
