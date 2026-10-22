@@ -48,6 +48,8 @@ def start():
         "NARRATARR_BUSY_WAIT": "2",
         "NARRATARR_ABS_WATCHER_WAIT": "8",
         "NARRATARR_HARDCOVER_URL_OVERRIDE": f"http://127.0.0.1:{MOCK_PORT}/hardcover/v1/graphql",
+        "NARRATARR_UPDATE_URL_OVERRIDE": f"http://127.0.0.1:{MOCK_PORT}/github/releases/latest",
+        "NARRATARR_VERSION": "0.1.0",
     }
     app = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(APP_PORT), "--log-level", "warning"],
                            cwd=ROOT, env=env, stdout=open(WORK / "app.log", "w", encoding="utf-8"), stderr=subprocess.STDOUT)
@@ -545,6 +547,30 @@ def main():
         assert c.post(f"/api/library/{other['id']}/reencode", json={"merge": False, "kbps": 96}).status_code == 409
         assert c.post("/api/abs/items/li_exist/reencode").status_code == 409
         ok("single file already at a low bitrate: refused with 'nothing to gain'")
+
+        # 9 — health light, update check, first-run guide
+        print("Scenario 9: health, updates, welcome guide")
+        hs = c.get("/api/system/health").json()
+        assert hs["version"] == "0.1.0" and hs["welcome_done"] is False, hs
+        assert hs["health"]["level"] == "ok", hs["health"]
+        c.post("/api/system/update/check").raise_for_status()  # the startup check ran before the mock was up
+        hs = c.get("/api/system/health").json()
+        assert hs["update"]["available"] and hs["update"]["latest"]["version"] == "0.2.0", hs["update"]
+        assert "What's Changed" in hs["update"]["latest"]["notes"]
+        ok("v0.1.0 sees v0.2.0 on GitHub with its release notes; health light green")
+        good_url = next(x for x in c.get("/api/settings").json() if x["key"] == "slskd.url")["value"]
+        c.put("/api/settings", json={"slskd.url": "http://127.0.0.1:9"}).raise_for_status()
+        hs = c.get("/api/system/health").json()
+        assert hs["health"]["level"] == "bad" and any("slskd" in i["text"] for i in hs["health"]["issues"]), hs["health"]
+        c.put("/api/settings", json={"slskd.url": good_url}).raise_for_status()
+        assert c.get("/api/system/health").json()["health"]["level"] == "ok"
+        ok("slskd down → red with the reason; back to green once fixed")
+        c.put("/api/settings", json={"general.welcome_done": True, "general.check_updates": False}).raise_for_status()
+        hs = c.get("/api/system/health").json()
+        assert hs["welcome_done"] is True and not hs["update"]["enabled"] and not hs["update"]["available"], hs
+        hidden = next(x for x in c.get("/api/settings").json() if x["key"] == "general.welcome_done")
+        assert hidden["type"] == "hidden" and hidden["value"] is True
+        ok("welcome guide remembered as done; turning update checks off hides the notice")
     except AssertionError as e:
         failures += 1
         print("FAIL:", e)

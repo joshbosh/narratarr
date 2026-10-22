@@ -188,6 +188,14 @@ def require_key(request: Request):
         raise HTTPException(401)
 
 
+@app.get("/github/releases/latest")
+async def gh_latest():
+    return {"tag_name": "v0.2.0", "html_url": "https://github.com/joshbosh/narratarr/releases/tag/v0.2.0",
+            "published_at": "2026-10-22T00:00:00Z",
+            "body": "## What's Changed\n* Example change by @someone in https://github.com/joshbosh/narratarr/pull/9\n\n"
+                    "**Full Changelog**: https://github.com/joshbosh/narratarr/compare/v0.1.9...v0.2.0"}
+
+
 @app.post("/mock/config")
 def mock_config(body: dict = Body(...)):
     CONFIG.update(body)

@@ -22,7 +22,7 @@ SECRET_MASK = "••••••••"
 class Setting:
     key: str
     default: Any
-    type: str  # str | int | float | bool | secret | select | text
+    type: str  # str | int | float | bool | secret | select | text | hidden (stored, not shown)
     label: str
     group: str
     help: str = ""
@@ -140,6 +140,10 @@ SCHEMA: list[Setting] = [
 
     # --- general / auth groundwork ----------------------------------------
     Setting("general.poll_seconds", 5, "int", "Download poll interval (seconds)", "General"),
+    Setting("general.check_updates", True, "bool", "Check for updates", "General",
+            "Asks GitHub for the latest Narratarr release a few times a day and shows “Update available” in the "
+            "sidebar. Nothing else is sent. Release builds only."),
+    Setting("general.welcome_done", False, "hidden", "Welcome guide finished", "General"),
     Setting("auth.mode", "none", "select", "Authentication", "General",
             "Placeholder — only 'none' is implemented. See app/auth.py.", options=["none"]),
 ]
@@ -152,7 +156,7 @@ def _coerce(s: Setting, value: Any) -> Any:
         return s.default
     t = s.type
     try:
-        if t == "bool":
+        if t == "bool" or (t == "hidden" and isinstance(s.default, bool)):
             if isinstance(value, str):
                 return value.strip().lower() in ("1", "true", "yes", "on")
             return bool(value)

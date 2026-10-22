@@ -58,7 +58,7 @@ Narratarr is on-demand only: there's no author or new-release monitoring.
 |---|---|---|
 | ![Queue](docs/screenshots/queue.png) | ![Library](docs/screenshots/library.png) | ![Candidates](docs/screenshots/candidates.png) |
 
-## Quick start (Docker Compose)
+## Installation
 
 ### Before you start
 
@@ -92,7 +92,7 @@ Narratarr needs three things from slskd:
   default it's `downloads` inside slskd's app directory, which is `/app/downloads` in the official container. Mount the
   same host folder into Narratarr at `/slskd-downloads`.
 
-### Install
+### Docker Compose (recommended)
 
 1. Create a `docker-compose.yml`:
 
@@ -128,8 +128,8 @@ docker compose up -d
 docker compose logs -f narratarr
 ```
 
-3. Open `http://<host>:8787/settings`. The path tiles at the top should all read **ok · writable**, and **Save & test**
-   for slskd should report *Connected*.
+3. Open `http://<host>:8787`. A short welcome guide walks through setup. In *Settings*, the path tiles at the top
+   should all read **ok · writable**, and **Save & test** for slskd should report *Connected*.
 
 Updating:
 
@@ -146,7 +146,7 @@ Stopping:
 docker compose down
 ```
 
-### Plain `docker run`
+### Docker CLI
 
 ```bash
 docker run -d --name narratarr --restart unless-stopped \
@@ -160,6 +160,20 @@ docker run -d --name narratarr --restart unless-stopped \
   -v /path/to/audiobooks:/audiobooks \
   ghcr.io/joshbosh/narratarr:latest
 ```
+
+Updating:
+
+```bash
+docker pull ghcr.io/joshbosh/narratarr:latest
+```
+```bash
+docker stop narratarr
+```
+```bash
+docker rm narratarr
+```
+
+Then run the same `docker run` command again. Settings, the queue and the library are kept in `/config`.
 
 If slskd runs in another compose project, put Narratarr on the same Docker network, or use the host's IP in
 `NARRATARR_SLSKD__URL`.
@@ -177,6 +191,16 @@ docker build -t narratarr:local .
 ```
 
 Then use `image: narratarr:local` in the compose file.
+
+### Updates and health
+
+The dot next to the version at the bottom of the sidebar is a health light: green when slskd is connected and logged in
+and the folders are writable, amber when something optional needs attention (Audiobookshelf unreachable, FFmpeg
+missing), and red when Narratarr can't download or file books. Hover it for the reasons; *Settings* lists them too.
+
+Release builds check GitHub for a newer release a few times a day. When there is one, **Update available** appears
+under the version; click it for the release notes and the update commands. Only the release lookup is sent. Turn it
+off in *Settings → General → Check for updates* (the welcome guide also asks).
 
 ## Volumes and permissions
 
@@ -349,6 +373,7 @@ first-run default with an environment variable. The variable only applies until 
 | `NARRATARR_ABS__DELETE_AFTER_IMPORT` | Delete from Narratarr after import | `true` |
 | `NARRATARR_ABS__SYNC_MINUTES` | Library sync interval (minutes) | `15` |
 | `NARRATARR_GENERAL__POLL_SECONDS` | Download poll interval (seconds) | `5` |
+| `NARRATARR_GENERAL__CHECK_UPDATES` | Check for updates | `true` |
 | `NARRATARR_AUTH__MODE` | Authentication | `none` |
 
 Other environment variables:
@@ -386,7 +411,7 @@ python tests/e2e.py
 The end-to-end suite starts mock Audible, Audnexus, Hardcover, slskd and Audiobookshelf servers
 (`tests/mocks/mock_server.py`) and runs real scenarios against them: narrator-specific matching, multi-disc books,
 failing and busy sources, manual picks, manual import, region fallback, Hardcover gap-filling and fallback, bitrate
-scoring, files going missing mid-download, re-encoding (joined and file by file), and the full Audiobookshelf hand-off. It needs `ffmpeg` on your PATH. On Windows,
+scoring, files going missing mid-download, re-encoding (joined and file by file), the health light and update check, and the full Audiobookshelf hand-off. It needs `ffmpeg` on your PATH. On Windows,
 use `.venv\Scripts\python.exe` in place of `python`.
 
 To run the app against the mocks and click around, see the environment variables used in `tests/e2e.py`.
@@ -402,6 +427,7 @@ app/
   matching.py      query variations, grouping, scoring
   slskd.py         slskd API client
   postprocess.py   organise, cover, sidecars
+  system.py        health light and update check
   reencode.py      FFmpeg re-encoding (joined M4B or file by file)
   tagging.py       mutagen tagging and chapter embedding
   library.py       library rescan, import folder discovery

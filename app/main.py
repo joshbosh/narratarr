@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from .api import router
 from .config import DATA_DIR, SettingsStore
 from .db import Database
 from .jobs import JobManager
+from .system import Health, UpdateChecker
 
 logging.basicConfig(level=os.environ.get("NARRATARR_LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -33,8 +35,18 @@ async def lifespan(app: FastAPI):
             logging.warning("Can't create %s: %s", p, e)
     jobs = JobManager(db, settings)
     app.state.db, app.state.settings, app.state.jobs = db, settings, jobs
+    app.state.updates = UpdateChecker(settings)
+    app.state.health = Health(settings, jobs)
     await jobs.start()
+
+    async def update_loop():
+        while True:
+            await app.state.updates.check()
+            await asyncio.sleep(3600)
+
+    update_task = asyncio.create_task(update_loop())
     yield
+    update_task.cancel()
     await jobs.stop()
 
 

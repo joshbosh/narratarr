@@ -251,3 +251,42 @@ a.pill.abs:hover { background: color-mix(in srgb, var(--abs) 12%, transparent); 
 }
 
 input[type="checkbox"] { accent-color: var(--accent); }
+
+/* ---------- footer: version, health, updates ---------- */
+.foot-line { display: flex; align-items: center; color: var(--faint); text-decoration: none; padding: 2px 0; }
+.foot-line:hover { color: var(--muted); }
+.foot-issues.warn { color: var(--warn); } .foot-issues.bad { color: var(--bad); }
+.sidebar-foot .dot.warn { background: var(--warn); }
+.foot-update { display: block; margin-top: 6px; padding: 0; border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; text-align: left; }
+.foot-update:hover { text-decoration: underline; }
+.health-box { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 12px 14px; margin-bottom: 10px; font-size: 13px; }
+.health-box ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
+.health-box.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.health-box.bad { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.health-box .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--faint); }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+.cmd { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 6px 6px 12px; margin: 6px 0; }
+.cmd code { flex: 1; font-family: var(--mono); font-size: 12.5px; overflow-x: auto; white-space: nowrap; }
+.update-modal h3 { margin: 18px 0 4px; font-size: 14px; }
+.update-modal p { margin: 4px 0; }
+.release-notes { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 14px 8px; margin-top: 14px; font-size: 13px; }
+.release-notes h4 { margin: 10px 0 4px; font-size: 13px; }
+.release-notes ul { margin: 0; padding-left: 18px; } .release-notes p { color: var(--muted); }
+.release-notes a { color: var(--accent); text-decoration: none; } .release-notes a:hover { text-decoration: underline; }
+
+/* ---------- welcome guide ---------- */
+.welcome .body { padding-top: 14px; }
+.welcome-body { min-height: 230px; }
+.welcome-body p { margin: 0 0 12px; line-height: 1.55; }
+.welcome-body ul { margin: 0 0 12px; padding-left: 20px; line-height: 1.6; }
+.welcome-tips li { margin-bottom: 6px; }
+.welcome-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 14px; }
+.welcome-status { font-size: 13px; padding: 8px 12px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
+.welcome-status.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.welcome-status.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
+.welcome-toggle { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; cursor: pointer; }
+.welcome-toggle .help { font-size: 12.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+.welcome-nav { display: flex; align-items: center; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.welcome-dots { display: flex; gap: 6px; }
+.welcome-dots button { width: 8px; height: 8px; padding: 0; border-radius: 50%; border: 0; background: var(--line-2); cursor: pointer; }
+.welcome-dots button.on { background: var(--accent); }
