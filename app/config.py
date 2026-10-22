@@ -26,12 +26,19 @@ class Setting:
     label: str
     group: str
     help: str = ""
-    options: list[str] = field(default_factory=list)
+    options: list = field(default_factory=list)
+    labels: dict = field(default_factory=dict)  # option value → display text
 
     @property
     def env(self) -> str:
         return "NARRATARR_" + self.key.upper().replace(".", "__")
 
+
+REENCODE_KBPS = {
+    64: "64 kbps · single narrator",
+    96: "96 kbps · light music and ambient effects",
+    128: "128 kbps · full-cast, dramatised productions",
+}
 
 SCHEMA: list[Setting] = [
     # --- slskd -------------------------------------------------------------
@@ -100,8 +107,9 @@ SCHEMA: list[Setting] = [
     Setting("processing.reencode_merge", True, "bool", "Join into one M4B when re-encoding", "Processing",
             "On: one M4B with chapters (file names aren't kept). Off: each file is re-encoded on its own and keeps "
             "its name and folder (MP3 stays MP3; other formats become AAC .m4a)."),
-    Setting("processing.reencode_kbps", 64, "int", "Re-encode bitrate (kbps)", "Processing",
-            "64 is plenty for speech."),
+    Setting("processing.reencode_kbps", 64, "int", "Re-encode bitrate", "Processing",
+            "Also the default for the Re-encode button. Never higher than the source's own bitrate.",
+            options=list(REENCODE_KBPS), labels={str(k): v for k, v in REENCODE_KBPS.items()}),
     Setting("processing.sidecars", True, "bool", "Write metadata.opf / metadata.json / desc.txt / reader.txt",
             "Processing", "Audiobookshelf reads all of these."),
 
@@ -212,7 +220,7 @@ class SettingsStore:
                 v = SECRET_MASK if v else ""
             out.append({
                 "key": s.key, "type": s.type, "label": s.label, "group": s.group,
-                "help": s.help, "options": s.options, "value": v,
+                "help": s.help, "options": s.options, "labels": s.labels, "value": v,
             })
         return out
 

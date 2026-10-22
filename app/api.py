@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 
 from . import __version__
 from .auth import User, current_user, require_admin
+from .config import REENCODE_KBPS
 from .integrations.abs import AbsClient
 from .library import find_book_folders, rescan
 from .providers import full_metadata, get_provider
@@ -64,6 +65,7 @@ async def system_status(request: Request):
     return {"version": __version__, "paths": paths, "ffmpeg": bool(shutil.which("ffmpeg")),
             "reencode_kbps": int(s.get("processing.reencode_kbps") or 64),
             "reencode_merge": bool(s.get("processing.reencode_merge")),
+            "reencode_choices": REENCODE_KBPS,
             "jobs": counts, "library": lib, "auth": s.get("auth.mode")}
 
 
@@ -326,21 +328,28 @@ async def library_send_to_abs(request: Request, item_id: int):
     return {"job_id": jid}
 
 
-async def _reencode_merge(request: Request, s) -> bool:
+async def _reencode_options(request: Request, s) -> tuple[bool, int]:
+    """merge and kbps from the request body, defaulting to the settings."""
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001  (no body)
         body = {}
-    merge = body.get("merge") if isinstance(body, dict) else None
-    return bool(s.get("processing.reencode_merge")) if merge is None else bool(merge)
+    body = body if isinstance(body, dict) else {}
+    merge = bool(s.get("processing.reencode_merge")) if body.get("merge") is None else bool(body["merge"])
+    try:
+        kbps = int(body.get("kbps") or s.get("processing.reencode_kbps") or 64)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "kbps must be a number") from None
+    if not 32 <= kbps <= 320:
+        raise HTTPException(400, "Bitrate must be between 32 and 320 kbps")
+    return merge, kbps
 
 
-def _reencode_check(s, files: list, merge: bool) -> None:
+def _reencode_check(s, files: list, merge: bool, kbps: int) -> None:
     from .reencode import should_reencode
     import shutil as _sh
     if not _sh.which("ffmpeg"):
         raise HTTPException(409, "ffmpeg isn't available in this container")
-    kbps = int(s.get("processing.reencode_kbps") or 64)
     if not files:
         raise HTTPException(404, "No audio files found in the book's folder")
     if not should_reencode(files, kbps, merge):
@@ -359,10 +368,11 @@ async def library_reencode(request: Request, item_id: int, user: User = Depends(
     if not folder.is_dir():
         raise HTTPException(404, f"Folder not found: {folder}")
     files = await asyncio.to_thread(audio_files, folder)
-    merge = await _reencode_merge(request, s)
-    await asyncio.to_thread(_reencode_check, s, files, merge)
+    merge, kbps = await _reencode_options(request, s)
+    await asyncio.to_thread(_reencode_check, s, files, merge, kbps)
     book = row["book"] or {}
-    jid = jobs.create_reencode(book, folder, abs_item_id=None, library_id=item_id, user_id=user.id, merge=merge)
+    jid = jobs.create_reencode(book, folder, abs_item_id=None, library_id=item_id, user_id=user.id,
+                               merge=merge, kbps=kbps)
     return {"job_id": jid}
 
 
@@ -382,9 +392,9 @@ async def abs_item_reencode(request: Request, item_id: str, user: User = Depends
     if not folder.is_dir():
         raise HTTPException(404, f"Narratarr can't see {folder} — is the Audiobookshelf folder mounted?")
     files = await asyncio.to_thread(audio_files, folder)
-    merge = await _reencode_merge(request, s)
-    await asyncio.to_thread(_reencode_check, s, files, merge)
-    jid = jobs.create_reencode(book, folder, abs_item_id=item_id, user_id=user.id, merge=merge)
+    merge, kbps = await _reencode_options(request, s)
+    await asyncio.to_thread(_reencode_check, s, files, merge, kbps)
+    jid = jobs.create_reencode(book, folder, abs_item_id=item_id, user_id=user.id, merge=merge, kbps=kbps)
     return {"job_id": jid}
 
 

@@ -231,7 +231,7 @@ a.pill.abs:hover { background: color-mix(in srgb, var(--abs) 12%, transparent); 
 
 /* ---------- activity panel (sidebar) ---------- */
 .activity { margin-top: auto; display: flex; flex-direction: column; gap: 2px; padding-top: 10px; border-top: 1px solid var(--line); }
-.activity + .sidebar-foot { margin-top: 10px; }
+.activity:not([hidden]) + .sidebar-foot { margin-top: 10px; }
 .act-row { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; padding: 7px 8px; border-radius: 7px; cursor: pointer; }
 .act-row:hover { background: var(--panel-2); }
 .act-icon { width: 16px; height: 16px; margin-top: 1px; color: var(--muted); }

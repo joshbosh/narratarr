@@ -226,8 +226,16 @@ Each book folder also gets `cover.jpg`, `desc.txt`, `reader.txt`, `metadata.opf`
 
 ## Re-encoding
 
-Audiobook rips are often far bigger than speech needs. Narratarr can re-encode them at a lean bitrate (64 kbps by
-default, which is plenty for speech) in one of two ways:
+Audiobook rips are often far bigger than they need to be. Narratarr can re-encode them to AAC (or MP3, for MP3 files
+re-encoded on their own) at the bitrate you choose:
+
+| Bitrate | Best for |
+|---|---|
+| **64 kbps** (default) | Standard single-narrator books |
+| **96 kbps** | Books with light music or ambient effects |
+| **128 kbps** | Full-cast, dramatised productions with sound effects and stereo music |
+
+There are two ways to do it:
 
 | Mode | Result | Names kept |
 |---|---|---|
@@ -235,11 +243,12 @@ default, which is plenty for speech) in one of two ways:
 | **File by file** | Each file is re-encoded on its own, in its own folder. MP3 stays MP3, M4B/M4A stay AAC, and other formats (FLAC, WAV, OGG, WMA) become AAC `.m4a` with the same base name. Files already at a lean bitrate are left alone. | Yes |
 
 - **Automatic** (off by default): *Settings → Processing → Re-encode to save space* re-encodes each finished book
-  before it's tagged and sent to Audiobookshelf. *Join into one M4B when re-encoding* (on by default) picks the mode.
+  before it's tagged and sent to Audiobookshelf. *Join into one M4B when re-encoding* (on by default) picks the mode,
+  and *Re-encode bitrate* the bitrate.
 - **On demand:** open any book in the Library, including Audiobookshelf books, and press **Re-encode**. The dialog
-  shows the current size and an estimate, and lets you choose whether to join. It runs as a Queue job with progress in
-  the sidebar. Audiobookshelf books are re-encoded in their own folder, re-tagged from Audiobookshelf's metadata, and
-  Audiobookshelf is asked to rescan the item.
+  shows the current size and an estimate, and lets you choose the bitrate and whether to join (both default to your
+  settings). It runs as a Queue job with progress in the sidebar. Audiobookshelf books are re-encoded in their own
+  folder, re-tagged from Audiobookshelf's metadata, and Audiobookshelf is asked to rescan the item.
 
 It only runs when it helps: joining several files, or files more than 25% above the target bitrate. It never encodes
 above the source's own bitrate, so lean files can't grow. Each new file is checked against the original's length before
@@ -327,7 +336,7 @@ first-run default with an environment variable. The variable only applies until 
 | `NARRATARR_PROCESSING__EMBED_CHAPTERS` | Embed chapters in single-file books | `true` |
 | `NARRATARR_PROCESSING__REENCODE` | Re-encode to save space | `false` |
 | `NARRATARR_PROCESSING__REENCODE_MERGE` | Join into one M4B when re-encoding | `true` |
-| `NARRATARR_PROCESSING__REENCODE_KBPS` | Re-encode bitrate (kbps) | `64` |
+| `NARRATARR_PROCESSING__REENCODE_KBPS` | Re-encode bitrate (`64`, `96` or `128`) | `64` |
 | `NARRATARR_PROCESSING__SIDECARS` | Write metadata.opf / metadata.json / desc.txt / reader.txt | `true` |
 | `NARRATARR_ABS__ENABLED` | Send finished books to Audiobookshelf | `false` |
 | `NARRATARR_ABS__URL` | Audiobookshelf URL | `http://audiobookshelf:80` |

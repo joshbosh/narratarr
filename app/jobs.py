@@ -527,11 +527,12 @@ class JobManager:
 
     # -------------------------------------------------------------- processing
     def create_reencode(self, book: dict, folder: Path, abs_item_id: str | None = None,
-                        library_id: int | None = None, user_id: str | None = None, merge: bool = True) -> int:
+                        library_id: int | None = None, user_id: str | None = None, merge: bool = True,
+                        kbps: int | None = None) -> int:
         s = _book_summary(book)
         s["asin"] = book.get("asin") or book.get("ref")
         now = time.time()
-        book = {**book, "_library_id": library_id, "_merge": bool(merge)}
+        book = {**book, "_library_id": library_id, "_merge": bool(merge), "_kbps": kbps}
         jid = self.db.insert("jobs", {
             "kind": "reencode", **s, "book": book, "status": "processing", "detail": "Waiting to re-encode",
             "staging_path": str(folder), "abs_item_id": abs_item_id, "requested_by": user_id,
@@ -547,8 +548,8 @@ class JobManager:
         job = self.get(job_id)
         folder = Path(job["staging_path"])
         merge = (job["book"] or {}).get("_merge", True)
+        kbps = int((job["book"] or {}).get("_kbps") or self.settings.get("processing.reencode_kbps") or 64)
         book = {k: v for k, v in (job["book"] or {}).items() if not k.startswith("_")}
-        kbps = int(self.settings.get("processing.reencode_kbps") or 64)
         try:
             if not folder.is_dir():
                 raise FileNotFoundError(f"Folder not found: {folder}")
