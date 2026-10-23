@@ -453,6 +453,8 @@ tests/             e2e.py and mock services
   and on a Queue item's source list and custom slskd search
 - Sort search results by series order, choosing between the orders Audible lists (for example publication order vs
   the author's preferred, chronological order)
+- Recommendations based on your Audiobookshelf library, using Hardcover's data (similar books, series, authors) or,
+  optionally, your own OpenAI or Anthropic API key
 - More metadata providers
 - Live updates over SSE instead of polling
 
