@@ -443,9 +443,18 @@ tests/             e2e.py and mock services
 - Collision detection with other apps that share slskd (e.g. DroppedNeedle, Soularr): detect when another tool
   grabs or moves Narratarr's downloads from slskd's completed folder, warn about it, and recover the files
 - Support for other download clients alongside slskd, such as torrent clients (qBittorrent, Transmission) and Usenet
-  (SABnzbd, NZBGet), with indexers via Prowlarr
+  (SABnzbd, NZBGet), with indexers via Prowlarr. These would work the way Sonarr and Radarr do: each download is sent
+  with a category (e.g. `audiobooks`) so it lands in the client's existing downloads folder, which is mounted into
+  Narratarr once and shared by all clients, with remote path mappings for when a client and Narratarr see that folder
+  under different paths. slskd keeps its own mount, since its downloads folder is fixed in its own config.
 - [Internet Archive](https://archive.org) as a download source, for public-domain and freely licensed audiobooks such
   as LibriVox recordings
+- Filter search results: a text box to narrow results (for example to "book 1" in a long series), on the Search page
+  and on a Queue item's source list and custom slskd search
+- Sort search results by series order, choosing between the orders Audible lists (for example publication order vs
+  the author's preferred, chronological order)
+- Recommendations based on your Audiobookshelf library, using Hardcover's data (similar books, series, authors) or,
+  optionally, your own OpenAI or Anthropic API key
 - More metadata providers
 - Live updates over SSE instead of polling
 
