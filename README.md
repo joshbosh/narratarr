@@ -444,6 +444,8 @@ tests/             e2e.py and mock services
   grabs or moves Narratarr's downloads from slskd's completed folder, warn about it, and recover the files
 - Support for other download clients alongside slskd, such as torrent clients (qBittorrent, Transmission) and Usenet
   (SABnzbd, NZBGet), with indexers via Prowlarr
+- [Internet Archive](https://archive.org) as a download source, for public-domain and freely licensed audiobooks such
+  as LibriVox recordings
 - More metadata providers
 - Live updates over SSE instead of polling
 
