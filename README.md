@@ -448,6 +448,8 @@ tests/             e2e.py and mock services
   as LibriVox recordings
 - Filter search results: a text box to narrow results (for example to "book 1" in a long series), on the Search page
   and on a Queue item's source list and custom slskd search
+- Sort search results by series order, choosing between the orders Audible lists (for example publication order vs
+  the author's preferred, chronological order)
 - More metadata providers
 - Live updates over SSE instead of polling
 
