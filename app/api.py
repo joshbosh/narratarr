@@ -69,6 +69,22 @@ async def system_status(request: Request):
             "jobs": counts, "library": lib, "auth": s.get("auth.mode")}
 
 
+@router.get("/system/health")
+async def system_health(request: Request):
+    """Sidebar footer: version, health light, update notice, first-run flag."""
+    st = request.app.state
+    asyncio.create_task(st.updates.check())  # throttled; usually a no-op
+    return {"version": __version__, "health": await st.health.get(), "update": st.updates.info(),
+            "welcome_done": bool(st.settings.get("general.welcome_done"))}
+
+
+@router.post("/system/update/check")
+async def system_update_check(request: Request):
+    st = request.app.state
+    await st.updates.check(force=True)
+    return st.updates.info()
+
+
 def _writable(p: Path) -> bool:
     import os
     return os.access(p, os.W_OK)
@@ -552,8 +568,12 @@ async def get_settings(request: Request):
 @router.put("/settings", dependencies=[Depends(require_admin)])
 async def put_settings(request: Request, payload: dict = Body(...)):
     s = _state(request)[1]
+    was_checking = bool(s.get("general.check_updates"))
     s.update(payload)
     _state(request)[2].abs.wake.set()
+    request.app.state.health.invalidate()
+    if s.get("general.check_updates") and not was_checking:
+        asyncio.create_task(request.app.state.updates.check(force=True))
     for p in (s.incomplete, s.completed):
         try:
             p.mkdir(parents=True, exist_ok=True)

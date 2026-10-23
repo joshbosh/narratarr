@@ -679,7 +679,18 @@ function renderImport(view) {
 
 // ================================================================ SETTINGS
 async function renderSettings(view) {
-  view.append(h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Settings"), h("div", { class: "sub" }, "Connections, matching and file handling. Saved to /config/narratarr.db."))));
+  view.append(h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Settings"), h("div", { class: "sub" }, "Connections, matching and file handling. Saved to /config/narratarr.db.")),
+    h("button", { class: "btn", type: "button", onclick: () => openWelcome() }, "Welcome guide")));
+  const healthBox = h("div", { class: "health-box" });
+  view.append(healthBox);
+  api("/api/system/health").then((hs) => {
+    const list = hs.health.issues || [];
+    healthBox.className = `health-box ${hs.health.level}`;
+    healthBox.replaceChildren(h("span", { class: `dot ${hs.health.level}` }),
+      list.length ? h("div", {}, h("b", {}, list.length === 1 ? "1 thing needs attention" : `${list.length} things need attention`),
+        h("ul", {}, list.map((x) => h("li", {}, x.text))))
+        : h("div", {}, h("b", {}, "Everything is working"), h("span", { class: "muted" }, " · slskd connected, folders writable")));
+  }).catch(() => healthBox.remove());
   const statusBox = h("div", { class: "statusbox" });
   const form = h("form", { onsubmit: (e) => { e.preventDefault(); save(); } });
   view.append(statusBox, form);
@@ -694,7 +705,7 @@ async function renderSettings(view) {
       h("div", { style: { fontSize: "12px", color: sys.ffmpeg ? "var(--ok)" : "var(--warn)" } }, sys.ffmpeg ? "ffmpeg available (m4b chapter embedding)" : "ffmpeg missing — m4b chapters skipped")));
 
   const groups = {};
-  for (const s of schema) (groups[s.group] ||= []).push(s);
+  for (const s of schema) if (s.type !== "hidden") (groups[s.group] ||= []).push(s);
   const tests = { slskd: "slskd", Metadata: "metadata", Audiobookshelf: "abs" };
 
   for (const [group, items] of Object.entries(groups)) {
@@ -817,15 +828,180 @@ async function refreshBadge() {
     b.title = review ? `${review} need review` : "";
   } catch { /* ignore */ }
 }
+// ------------------------------------------------- footer: version, health, updates
+const vlabel = (v) => `${/^\d/.test(v) ? "v" : ""}${v}`;
+let lastSystem = null;
+
 async function refreshFoot() {
+  const foot = $("#sidebar-foot");
   try {
-    const s = await api("/api/system/status");
-    $("#sidebar-foot").replaceChildren(h("div", {}, h("span", { class: `dot ${s.paths.completed.writable ? "ok" : "bad"}` }), `${/^\d/.test(s.version) ? "v" : ""}${s.version} · ${s.library} in library`));
-  } catch { $("#sidebar-foot").replaceChildren(h("div", {}, h("span", { class: "dot bad" }), "server unreachable")); }
+    const s = lastSystem = await api("/api/system/health");
+    const issues = s.health.issues || [];
+    const tip = issues.length ? issues.map((i) => `• ${i.text}`).join("\n") : "Everything is working";
+    const rows = [h("a", { class: "foot-line", href: "/settings", "data-link": "", title: tip },
+      h("span", { class: `dot ${s.health.level}` }), vlabel(s.version),
+      issues.length ? h("span", { class: `foot-issues ${s.health.level}` }, `\u00a0· ${issues.length} issue${issues.length === 1 ? "" : "s"}`) : null)];
+    if (s.update.available) {
+      rows.push(h("button", { class: "foot-update", onclick: () => openUpdateModal(s.update) },
+        `Update available: v${s.update.latest.version}`));
+    }
+    foot.replaceChildren(...rows);
+    return s;
+  } catch {
+    foot.replaceChildren(h("div", { class: "foot-line" }, h("span", { class: "dot bad" }), "Server unreachable"));
+    return null;
+  }
+}
+
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  const ta = h("textarea", { style: { position: "fixed", opacity: "0" } });
+  ta.value = text; document.body.append(ta); ta.select();
+  try { document.execCommand("copy"); } finally { ta.remove(); }
+  return Promise.resolve();
+}
+function cmdBlock(cmd) {
+  return h("div", { class: "cmd" }, h("code", {}, cmd),
+    h("button", { class: "btn ghost small", type: "button", onclick: async (e) => {
+      await copyText(cmd); e.target.textContent = "Copied"; setTimeout(() => { e.target.textContent = "Copy"; }, 1500);
+    } }, "Copy"));
+}
+
+// Minimal Markdown for GitHub's generated release notes: headings, bullets, **bold**, links.
+function mdInline(text) {
+  const out = [];
+  const re = /\*\*(.+?)\*\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s)]+)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1]) out.push(h("b", {}, m[1]));
+    else {
+      const url = m[3] || m[4];
+      const pr = url.match(/\/pull\/(\d+)$/);
+      out.push(h("a", { href: url, target: "_blank", rel: "noopener" }, m[2] || (pr ? `#${pr[1]}` : url.replace(/^https:\/\/github\.com\//, ""))));
+    }
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+function mdBlock(md) {
+  const box = h("div", { class: "release-notes" });
+  let list = null;
+  for (const raw of (md || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) { list = null; continue; }
+    const head = line.match(/^#{1,6}\s+(.*)$/);
+    const item = line.match(/^[*-]\s+(.*)$/);
+    if (head) { list = null; box.append(h("h4", {}, ...mdInline(head[1]))); }
+    else if (item) { if (!list) { list = h("ul"); box.append(list); } list.append(h("li", {}, ...mdInline(item[1]))); }
+    else { list = null; box.append(h("p", {}, ...mdInline(line))); }
+  }
+  return box;
+}
+
+function openUpdateModal(u) {
+  const image = "ghcr.io/joshbosh/narratarr:latest";
+  const date = u.latest.published_at ? new Date(u.latest.published_at).toLocaleDateString() : null;
+  openModal(h("div", { class: "modal small update-modal" },
+    h("header", {}, h("div", {},
+      h("h2", { style: { margin: 0 } }, `Narratarr v${u.latest.version} is available`),
+      h("div", { class: "muted", style: { fontSize: "13px", marginTop: "2px" } }, `You're on ${vlabel(u.current)}${date ? ` · released ${date}` : ""}`)),
+      h("button", { class: "btn ghost close", onclick: closeModal }, "✕")),
+    h("div", { class: "body" },
+      u.latest.notes ? mdBlock(u.latest.notes) : null,
+      h("h3", {}, "Docker Compose"),
+      h("p", { class: "muted" }, "In the folder with your docker-compose.yml:"),
+      cmdBlock("docker compose pull"), cmdBlock("docker compose up -d"),
+      h("h3", {}, "Docker CLI"),
+      cmdBlock(`docker pull ${image}`), cmdBlock("docker stop narratarr"), cmdBlock("docker rm narratarr"),
+      h("p", { class: "muted" }, "Then run your original docker run command again."),
+      h("p", { class: "faint", style: { fontSize: "12.5px" } }, "Settings, the queue and your library are kept in /config, so nothing is lost."),
+      h("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "16px" } },
+        h("a", { class: "btn", href: u.latest.url, target: "_blank", rel: "noopener" }, "View release on GitHub"),
+        h("button", { class: "btn primary", onclick: closeModal }, "Done")))));
+}
+
+// ------------------------------------------------- first-run welcome guide
+async function openWelcome() {
+  let sys = lastSystem;
+  try { sys = await api("/api/system/health"); } catch { /* show anyway */ }
+  const issues = sys?.health?.issues || [];
+  const about = (prefix) => issues.filter((i) => i.text.toLowerCase().startsWith(prefix));
+  const statusLine = (list, okText, todoText) => list.length
+    ? h("div", { class: "welcome-status warn" }, "To do: ", list.map((i) => i.text).join(" · "))
+    : h("div", { class: "welcome-status ok" }, okText || todoText);
+  const absOn = (await api("/api/settings").catch(() => [])).find?.((x) => x.key === "abs.enabled")?.value;
+  const updates = h("input", { type: "checkbox", checked: true });
+  const flow = h("div", { class: "welcome-flow" },
+    ...["Search", "Request", "slskd downloads", "Tagged + chapters", "Audiobookshelf"].flatMap((t, i, a) =>
+      [h("span", { class: "pill" }, t), i < a.length - 1 ? h("span", { class: "faint" }, "→") : null]).filter(Boolean));
+  const slides = [
+    { title: "Welcome to Narratarr", body: [
+      h("p", {}, "Find an audiobook by its Audible release and request it. Narratarr searches Soulseek through slskd, picks the best match, downloads it, tags it with cover art and chapters, and files it into Audiobookshelf."),
+      flow,
+      h("p", { class: "muted" }, "This quick guide covers what to set up. You can reopen it from Settings at any time.")] },
+    { title: "Connect slskd", body: [
+      h("p", {}, "Narratarr downloads through your slskd instance. In ", h("b", {}, "Settings → slskd"), " you'll need:"),
+      h("ul", {}, h("li", {}, "slskd's URL, reachable from this container"),
+        h("li", {}, "an API key with the ", h("b", {}, "readwrite"), " role (from slskd.yml)"),
+        h("li", {}, "slskd's downloads folder mounted into Narratarr at /slskd-downloads")),
+      statusLine([...about("slskd"), ...issues.filter((i) => /folder/i.test(i.text))], "slskd is connected and the folders are writable.")] },
+    { title: "Audiobookshelf (optional)", body: [
+      h("p", {}, "Finished books can go straight into an Audiobookshelf library, with metadata filled in and duplicates flagged in Search. In ", h("b", {}, "Settings → Audiobookshelf"), ":"),
+      h("ul", {}, h("li", {}, "mount your Audiobookshelf library folder into Narratarr"),
+        h("li", {}, "add an admin user's API key, then pick the library and folder")),
+      absOn ? statusLine(about("audiobookshelf"), "Audiobookshelf is connected.")
+        : h("div", { class: "welcome-status" }, "Not set up. Without it, finished books stay in Narratarr's completed folder.")] },
+    { title: "Good to know", body: [h("ul", { class: "welcome-tips" },
+      h("li", {}, h("b", {}, "Needs review: "), "when no source is a confident match, the job waits for you to pick one or run a custom search."),
+      h("li", {}, h("b", {}, "Activity: "), "the bottom of the sidebar shows what's happening right now."),
+      h("li", {}, h("b", {}, "Hardcover: "), "an optional second metadata source that fills gaps (free API key, Settings → Metadata)."),
+      h("li", {}, h("b", {}, "Re-encode: "), "shrink books to a lean bitrate, automatically or with the Re-encode button in the Library."),
+      h("li", {}, h("b", {}, "Health light: "), "the dot next to the version turns amber or red when something needs attention; hover it for details."))] },
+    { title: "Stay up to date", body: [
+      h("label", { class: "field welcome-toggle" },
+        h("div", {}, h("div", {}, h("b", {}, "Check for updates")),
+          h("div", { class: "help" }, "Narratarr asks GitHub for the latest release a few times a day and shows “Update available” in the sidebar. Nothing else is sent. You can change this in Settings → General.")),
+        h("span", { class: "switch" }, updates, h("span"))),
+      sys && sys.update && !sys.update.release_build
+        ? h("p", { class: "faint", style: { fontSize: "12.5px" } }, "This is a development build, so it won't check until you run a release.") : null] },
+  ];
+  let i = 0;
+  const title = h("h2", { style: { margin: 0 } });
+  const body = h("div", { class: "welcome-body" });
+  const dots = h("div", { class: "welcome-dots" });
+  const back = h("button", { class: "btn ghost", type: "button" }, "Back");
+  const next = h("button", { class: "btn primary", type: "button" });
+  let saved = false;
+  const persist = () => {
+    if (saved) return;
+    saved = true;
+    api("/api/settings", { method: "PUT", body: { "general.welcome_done": true, "general.check_updates": updates.checked } })
+      .then(() => refreshFoot()).catch(() => { /* shown again next visit */ });
+  };
+  const finish = () => { persist(); closeModal(); };
+  const show = () => {
+    title.textContent = slides[i].title;
+    body.replaceChildren(...slides[i].body.filter(Boolean));
+    dots.replaceChildren(...slides.map((_, n) => h("button", { type: "button", class: n === i ? "on" : "", "aria-label": `Step ${n + 1}`, onclick: () => { i = n; show(); } })));
+    back.hidden = i === 0;
+    next.textContent = i === slides.length - 1 ? "Finish" : "Next";
+  };
+  back.addEventListener("click", () => { i = Math.max(0, i - 1); show(); });
+  next.addEventListener("click", () => { if (i === slides.length - 1) finish(); else { i += 1; show(); } });
+  openModal(h("div", { class: "modal small welcome" },
+    h("header", {}, title, h("button", { class: "btn ghost close", title: "Skip the guide", onclick: finish }, "✕")),
+    h("div", { class: "body" }, body,
+      h("div", { class: "welcome-nav" }, dots, h("span", { class: "grow" }),
+        h("button", { class: "btn ghost", type: "button", onclick: finish }, "Skip"), back, next))),
+    persist);
+  show();
 }
 
 route();
-refreshBadge(); refreshFoot(); refreshActivity();
+refreshBadge(); refreshActivity();
+refreshFoot().then((s) => { if (s && !s.welcome_done) openWelcome(); });
 setInterval(refreshBadge, 5000);
 setInterval(refreshActivity, 2500);
 setInterval(refreshFoot, 30000);
