@@ -446,6 +446,8 @@ tests/             e2e.py and mock services
   (SABnzbd, NZBGet), with indexers via Prowlarr
 - [Internet Archive](https://archive.org) as a download source, for public-domain and freely licensed audiobooks such
   as LibriVox recordings
+- Filter search results: a text box to narrow results (for example to "book 1" in a long series), on the Search page
+  and on a Queue item's source list and custom slskd search
 - More metadata providers
 - Live updates over SSE instead of polling
 
