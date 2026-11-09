@@ -278,9 +278,11 @@ def main():
         assert not any("editor" in a["query"] or "foreword" in a["query"] or "contributing" in a["query"]
                        for a in j["attempts"]), [a["query"] for a in j["attempts"]]
         out = Path(j["output_path"])
-        assert out.parts[-2] == "Lena Krause, Omar Field", out
+        assert out.parts[-2] == "Lena Krause", "an anthology is filed under its editor, not the foreword writer"
         t = mutagen.File(str(out / "Essays On Rivers.m4b"))
-        assert t["\xa9ART"] == ["Lena Krause, Omar Field"], t.get("\xa9ART")
+        assert t["\xa9ART"] == ["Lena Krause"], t.get("\xa9ART")
+        opf = (out / "metadata.opf").read_text()
+        assert 'opf:role="aut">Lena Krause<' in opf and 'opf:role="aui">Omar Field<' in opf, opf
         ok(f"roles split off (editor, foreword); queries {[a['query'] for a in j['attempts']]}; tags and folder clean")
 
         # 6c — Hardcover: off by default; when on, fills gaps, adds books, and is the fallback
@@ -489,6 +491,92 @@ def main():
         ok("folder watcher off → fell back to a library scan and still matched the item")
         assert c.get(f"/api/abs/items/li_exist/cover").status_code == 200
         ok("Audiobookshelf covers proxied")
+        httpx.post(f"http://127.0.0.1:{MOCK_PORT}/mock/abs", json={"watcher": True})
+
+        # 7b — ebooks, filed into a separate Audiobookshelf library
+        print("Scenario 7b: Ebooks")
+        ebook_local = WORK / "abs-ebooks"
+        c.put("/api/settings", json={"abs.ebook_library_id": "lib_ebooks", "abs.ebook_folder_id": "fol_eb",
+                                     "abs.ebook_local_path": str(ebook_local),
+                                     "abs.delete_after_import": True}).raise_for_status()
+        t = c.post("/api/settings/test/abs").json()
+        assert t["ok"] and "ebooks go to /ebooks" in t["message"], t
+        audio_hits = search(c, "paper lantern")
+        assert len(audio_hits) == 3, "audiobook search keeps both narrations and the full-cast edition"
+        eb = c.get("/api/search", params={"q": "paper lantern", "media": "ebook"}).json()
+        assert eb["media"] == "ebook" and len(eb["results"]) == 1, [r["asin"] for r in eb["results"]]
+        lantern = eb["results"][0]
+        assert lantern["narrators"] == [] and lantern["runtime_min"] is None and lantern["media"] == "ebook"
+        assert lantern["ref"] == "B0EBOOK001" and not lantern.get("asin"), lantern
+        assert not any("Full-Cast" in s["name"] for s in lantern["series"]), lantern["series"]
+        ok("ebook search merges the narrations into one result: no narrator, runtime, audiobook ASIN or "
+           "full-cast edition")
+
+        r = c.post("/api/jobs", json={"asin": lantern["asin"], "ref": lantern["ref"], "region": lantern["region"],
+                                      "book": lantern, "media": "ebook"})
+        r.raise_for_status()
+        ej = r.json()["id"]
+        assert r.json()["media"] == "ebook"
+        assert c.post("/api/jobs", json={"ref": lantern["ref"], "book": lantern, "media": "ebook"}).status_code == 409
+        aj = c.post("/api/jobs", json={"asin": lantern["asin"], "ref": lantern["ref"], "region": lantern["region"],
+                                       "book": audio_hits[0]})
+        assert aj.status_code == 200, "an audiobook request isn't blocked by the same title's ebook job"
+        c.post(f"/api/jobs/{aj.json()['id']}/cancel").raise_for_status()
+        j = wait_status(c, ej, {"completed", "failed", "needs_review"}, 90)
+        assert j["status"] == "completed", (j["detail"], [l["msg"] for l in j["log"]])
+        cands = j["candidates"]
+        assert cands[0]["formats"] == ["epub"] and cands[0]["display_dir"].endswith("Paper Lantern.epub"), cands[0]
+        assert all(c_["formats"][0] in ("epub", "pdf") for c_ in cands), "audio files never offered for an ebook"
+        other = next(c_ for c_ in cands if "Returns" in c_["display_dir"])
+        assert other["score"] < cands[0]["score"] and any("≠ #1" in x for x in other["reasons"]), other
+        pdf = next(c_ for c_ in cands if c_["formats"] == ["pdf"])
+        assert pdf["score"] < cands[0]["score"]
+        ok(f"epub picked (score {cands[0]['score']}) over the faster pdf ({pdf['score']}) "
+           f"and the series sequel in the same folder ({other['score']})")
+        for _ in range(60):
+            j = c.get(f"/api/jobs/{ej}").json()
+            if j["abs_status"] != "pending":
+                break
+            time.sleep(1)
+        assert j["abs_status"] == "imported", (j["abs_detail"], [l["msg"] for l in j["log"]])
+        edest = ebook_local / "Ella Page/Lantern Tales/Book 1 - Paper Lantern"
+        assert (edest / "Paper Lantern.epub").exists() and (edest / "cover.jpg").exists(), list(ebook_local.rglob("*"))
+        assert (edest / "metadata.opf").exists() and not (edest / "reader.txt").exists()
+        assert not any(abs_local.rglob("*.epub")), "nothing went into the audiobook library"
+        item = httpx.get(f"http://127.0.0.1:{MOCK_PORT}/mock/abs/items").json()[j["abs_item_id"]]
+        assert item["lib"] == "lib_ebooks" and item["ebooks"] == ["Paper Lantern.epub"], item
+        assert item["meta"]["narrators"] == [] and item["meta"]["series"] == [{"name": "Lantern Tales", "sequence": "1"}]
+        assert not item["meta"]["asin"] and "ASIN" not in (edest / "metadata.opf").read_text(), \
+            "the audiobook's ASIN must not be written to an ebook"
+        ok("epub filed into the ebook library folder with cover and OPF, scanned, metadata filled, no narrator")
+        eb2 = c.get("/api/search", params={"q": "paper lantern", "media": "ebook"}).json()["results"][0]
+        assert eb2["in_abs"], "ebook search sees the ebook library"
+        assert not any(r_["in_abs"] for r_ in search(c, "paper lantern")), "audiobook search doesn't"
+        lib = c.get("/api/library").json()
+        assert any(b["media"] == "ebook" and b["title"] == "Paper Lantern" for b in lib["audiobookshelf"])
+        ok("Search and Library tell the ebook library and the audiobook library apart")
+
+        # with Hardcover on, the book's own record leads: its cover and description, not the audiobook's
+        c.put("/api/settings", json={"metadata.hardcover_enabled": True,
+                                     "metadata.hardcover_token": "hctoken"}).raise_for_status()
+        eb = c.get("/api/search", params={"q": "paper lantern", "media": "ebook"}).json()
+        assert eb["sources"] == 2 and len(eb["results"]) == 1, [r["ref"] for r in eb["results"]]
+        hb = eb["results"][0]
+        assert hb["ref"] == "hardcover:104" and hb["cover_url"].endswith("/cover/hc104.jpg"), hb
+        assert hb["description"] == "The printed story of a paper lantern." and not hb.get("asin"), hb
+        assert hb["series"] == [{"name": "Lantern Tales", "sequence": "1", "asin": None}], hb["series"]
+        assert [(a["name"], a["role"]) for a in hb["authors"]] == [("Ella Page", None), ("Ivo Sketch", "illustrator")]
+        sys.path.insert(0, str(ROOT))
+        from app.postprocess import _opf, render_template
+        assert render_template("{author}/{title}", hb).parts[0] == "Ella Page", "illustrator kept out of the folder"
+        assert 'opf:role="ill">Ivo Sketch<' in _opf(hb) and 'opf:role="aut">Ivo Sketch' not in _opf(hb)
+        r = c.post("/api/jobs", json={"ref": "hardcover:104", "media": "ebook"})
+        r.raise_for_status()
+        hj = r.json()
+        assert hj["cover_url"].endswith("/cover/hc104.jpg") and hj["book"]["description"].startswith("The printed"), hj
+        c.post(f"/api/jobs/{hj['id']}/cancel").raise_for_status()
+        c.put("/api/settings", json={"metadata.hardcover_enabled": False}).raise_for_status()
+        ok("Hardcover on: ebook results use the book's own cover and description; Audible only fills gaps")
 
         # 8 — on-demand re-encode of a Narratarr library item and an Audiobookshelf item
         print("Scenario 8: Re-encode button")
